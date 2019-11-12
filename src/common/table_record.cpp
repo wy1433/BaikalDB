@@ -658,6 +658,7 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
 // for cstore
 // return -3 when equals to default value
 int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
+    static bool is_big = KeyEncoder::is_big_endian();
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     int32_t field_id = field_info.id;
@@ -689,8 +690,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint16_t encode = KeyEncoder::to_little_endian_u16(static_cast<uint16_t>(val));
-            out.append((char*)&encode, sizeof(uint16_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(int16_t)), sizeof(int16_t));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(int16_t));
+            }
         } break;
         case pb::TIME:
         case pb::INT32: {
@@ -700,8 +704,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint32_t encode = KeyEncoder::to_little_endian_u32(static_cast<uint32_t>(val));
-            out.append((char*)&encode, sizeof(uint32_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(int32_t)), sizeof(int32_t));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(int32_t));
+            }
         } break;
         case pb::INT64: {
             int64_t val = _reflection->GetInt64(*_message, field);
@@ -710,8 +717,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint64_t encode = KeyEncoder::to_little_endian_u64(static_cast<uint64_t>(val));
-            out.append((char*)&encode, sizeof(uint64_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(int64_t)), sizeof(int64_t));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(int64_t));
+            }
         } break;
         case pb::UINT8: {
             uint8_t val = _reflection->GetUInt32(*_message, field);
@@ -729,8 +739,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint16_t encode = KeyEncoder::to_little_endian_u16(val);
-            out.append((char*)&encode, sizeof(uint16_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(uint16_t)), sizeof(uint16_t));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(uint16_t));
+            }
         } break;
         case pb::TIMESTAMP:
         case pb::DATE:
@@ -741,8 +754,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint32_t encode = KeyEncoder::to_little_endian_u32(val);
-            out.append((char*)&encode, sizeof(uint32_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(uint32_t)), sizeof(uint32_t));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(uint32_t));
+            }
         } break;
         case pb::DATETIME:
         case pb::UINT64: {
@@ -752,8 +768,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint64_t encode = KeyEncoder::to_little_endian_u64(val);
-            out.append((char*)&encode, sizeof(uint64_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(uint64_t)), sizeof(uint64_t));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(uint64_t));
+            }
         } break;
         case pb::FLOAT: {
             float val = _reflection->GetFloat(*_message, field);
@@ -762,8 +781,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                     return -3;
                 }
             }
-            uint32_t encode = KeyEncoder::to_little_endian_u32(*reinterpret_cast<uint32_t*>(&val));
-            out.append((char*)&encode, sizeof(uint32_t));
+            if (is_big) {
+                out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(float)), sizeof(float));
+            } else {
+                out.append(reinterpret_cast<char*>(&val), sizeof(float));
+            }
         } break;
         case pb::DOUBLE: {
            double val = _reflection->GetDouble(*_message, field);
@@ -772,8 +794,11 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
                    return -3;
                }
            }
-           uint64_t encode = KeyEncoder::to_little_endian_u64(*reinterpret_cast<uint64_t*>(&val));
-           out.append((char*)&encode, sizeof(uint64_t));
+           if (is_big) {
+               out.append(swap_endian(reinterpret_cast<char*>(&val), sizeof(double)), sizeof(double));
+           } else {
+               out.append(reinterpret_cast<char*>(&val), sizeof(double));
+           }
         } break;
         case pb::BOOL: {
             uint8_t  val = _reflection->GetBool(*_message, field);
@@ -803,6 +828,7 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
 
 // for cstore
 int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in) {
+    static bool is_big = KeyEncoder::is_big_endian();
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     int32_t field_id = field_info.id;
@@ -826,8 +852,12 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
                 DB_WARNING("int16_t out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            _reflection->SetInt32(_message, field, static_cast<int16_t>(
-                    KeyEncoder::to_little_endian_u16(*reinterpret_cast<uint16_t*>(c))));
+            if (is_big) {
+                _reflection->SetInt32(_message, field, *reinterpret_cast<int16_t*>(
+                        swap_endian(c, sizeof(int16_t))));
+            } else {
+                _reflection->SetInt32(_message, field, *reinterpret_cast<int16_t*>(c));
+            }
         } break;
         case pb::TIME:
         case pb::INT32: {
@@ -835,16 +865,24 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
                 DB_WARNING("int32_t out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            _reflection->SetInt32(_message, field, static_cast<int32_t>(
-                    KeyEncoder::to_little_endian_u32(*reinterpret_cast<uint32_t*>(c))));
+            if (is_big) {
+                _reflection->SetInt32(_message, field, *reinterpret_cast<int32_t*>(
+                        swap_endian(c, sizeof(int32_t))));
+            } else {
+                _reflection->SetInt32(_message, field, *reinterpret_cast<int32_t*>(c));
+            }
         } break;
         case pb::INT64: {
             if (sizeof(int64_t) > in.size()) {
                 DB_WARNING("int64_t out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            _reflection->SetInt64(_message, field, static_cast<int64_t>(
-                    KeyEncoder::to_little_endian_u64(*reinterpret_cast<uint64_t*>(c))));
+            if (is_big) {
+                _reflection->SetInt64(_message, field, *reinterpret_cast<int64_t*>(
+                        swap_endian(c, sizeof(int64_t))));
+            } else {
+                _reflection->SetInt64(_message, field, *reinterpret_cast<int64_t*>(c));
+            }
         } break;
         case pb::UINT8: {
             if (sizeof(uint8_t) > in.size()) {
@@ -858,8 +896,12 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
                 DB_WARNING("uint16_t out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            _reflection->SetUInt32(_message, field,
-                                   KeyEncoder::to_little_endian_u16(*reinterpret_cast<uint16_t*>(c)));
+            if (is_big) {
+                _reflection->SetUInt32(_message, field, *reinterpret_cast<uint16_t*>(
+                        swap_endian(c, sizeof(uint16_t))));
+            } else {
+                _reflection->SetUInt32(_message, field, *reinterpret_cast<uint16_t*>(c));
+            }
         } break;
         case pb::TIMESTAMP:
         case pb::DATE:
@@ -868,8 +910,12 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
                 DB_WARNING("uint32_t out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            _reflection->SetUInt32(_message, field,
-                                   KeyEncoder::to_little_endian_u32(*reinterpret_cast<uint32_t*>(c)));
+            if (is_big) {
+                _reflection->SetUInt32(_message, field, *reinterpret_cast<uint32_t*>(
+                        swap_endian(c, sizeof(uint32_t))));
+            } else {
+                _reflection->SetUInt32(_message, field, *reinterpret_cast<uint32_t*>(c));
+            }
         } break;
         case pb::DATETIME:
         case pb::UINT64: {
@@ -877,24 +923,36 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
                 DB_WARNING("uint64_t out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            _reflection->SetUInt64(_message, field,
-                                   KeyEncoder::to_little_endian_u64(*reinterpret_cast<uint64_t*>(c)));
+            if (is_big) {
+                _reflection->SetUInt64(_message, field, *reinterpret_cast<uint64_t*>(
+                        swap_endian(c, sizeof(uint64_t))));
+            } else {
+                _reflection->SetUInt64(_message, field, *reinterpret_cast<uint64_t*>(c));
+            }
         } break;
         case pb::FLOAT: {
             if (sizeof(float) > in.size()) {
                 DB_WARNING("float out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            uint32_t val = KeyEncoder::to_little_endian_u32(*reinterpret_cast<uint32_t*>(c));
-            _reflection->SetFloat(_message, field, *reinterpret_cast<float*>(&val));
+            if (is_big) {
+                _reflection->SetFloat(_message, field, *reinterpret_cast<float*>(
+                        swap_endian(c, sizeof(float))));
+            } else {
+                _reflection->SetFloat(_message, field, *reinterpret_cast<float*>(c));
+            }
         } break;
         case pb::DOUBLE: {
             if (sizeof(double) > in.size()) {
                 DB_WARNING("double out of bound: %d %zu", field->number(), in.size());
                 return -2;
             }
-            uint64_t val = KeyEncoder::to_little_endian_u64(*reinterpret_cast<uint64_t*>(c));
-            _reflection->SetDouble(_message, field, *reinterpret_cast<double*>(&val));
+            if (is_big) {
+                _reflection->SetDouble(_message, field, *reinterpret_cast<double*>(
+                        swap_endian(c, sizeof(double))));
+            } else {
+                _reflection->SetDouble(_message, field, *reinterpret_cast<double*>(c));
+            }
         } break;
         case pb::BOOL: {
             if (sizeof(uint8_t) > in.size()) {

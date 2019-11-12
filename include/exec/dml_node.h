@@ -32,6 +32,7 @@ public:
     int remove_row(RuntimeState* state, SmartRecord record, 
             const std::string& pk_str, bool delete_primary = true);
     int update_row(RuntimeState* state, SmartRecord record, MemRow* row);
+    int update_part_row(RuntimeState* state, SmartRecord record, MemRow* row);
     int64_t table_id() {
         return _table_id;
     }

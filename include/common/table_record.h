@@ -151,6 +151,15 @@ public:
     // those two funcs are only used for encode/decode non-pk fields after primary, for cstore
     int encode_field(const FieldInfo& field_info, std::string& out);
     int decode_field(const FieldInfo& field_info, const std::string& in);
+    inline char* swap_endian(char* c, int n) {
+        for (int i = 0; i < n/2; i ++) {
+            int j = n -i -1;
+            c[i] = c[i] ^ c[j];
+            c[j] = c[i] ^ c[j];
+            c[i] = c[i] ^ c[j];
+        }
+        return c;
+    }
 
     const FieldDescriptor* get_field_by_idx(int32_t idx) {
         auto descriptor = _message->GetDescriptor();

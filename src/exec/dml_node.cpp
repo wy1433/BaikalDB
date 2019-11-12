@@ -106,6 +106,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     //DB_WARNING_STATE(state, "insert record: %s", record->debug_string().c_str());
     int ret = 0;
     int affected_rows = 0;
+    bool delete_before_put_primary = !_affect_primary && is_update;
     auto& reverse_index_map = state->reverse_index_map();
     if (_on_dup_key_update) {
         _dup_update_row->clear();
@@ -172,6 +173,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                         DB_WARNING_STATE(state, "remove fail, table_id:%ld ,ret:%d", _table_id, ret);
                         return -1;
                     }
+                    delete_before_put_primary = true;
                     ++affected_rows;
                 } else {
                     DB_WARNING_STATE(state, "insert row must not exist, index:%ld, ret:%d", _table_id, ret);
@@ -304,9 +306,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     // 列存为节省空间, 插入默认值时不会put, 因此不会覆盖未被删除的旧值
     // 更新时, _affect_primary=false时旧值会保留, 需要删除旧值
     // 替换时, _affect_primary=true且旧行已存在时, 需要删除旧值
-    ret = _txn->put_primary(_region_id, *_pri_info, record,
-            (!_affect_primary && is_update) ||
-            (_affect_primary && (ret==0) &&_is_replace));
+    ret = _txn->put_primary(_region_id, *_pri_info, record, delete_before_put_primary);
+
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;
@@ -419,6 +420,10 @@ int DMLNode::delete_row(RuntimeState* state, SmartRecord record) {
 }
 
 int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
+    if ((_table_info->engine == pb::ROCKSDB_CSTORE)
+            && (_node_type == pb::UPDATE_NODE) && !_affect_primary) {
+        return update_part_row(state, record, row);
+    }
     int ret = 0;
     std::string pk_str;
     ret = get_lock_row(state, record, &pk_str);
@@ -467,6 +472,86 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
                 _table_id, state->region_id());
         return 0;
     }*/
+    ret = insert_row(state, record, true);
+    if (ret < 0) {
+        DB_WARNING_STATE(state, "insert_row fail");
+        return -1;
+    }
+    return 1;
+}
+
+int DMLNode::update_part_row(RuntimeState* state, SmartRecord record, MemRow* row) {
+    // 仅查询更新涉及字段
+    _field_ids.clear();
+    for (size_t i = 0; i < _update_exprs.size(); i++) {
+        auto& slot = _update_slots[i];
+        FieldInfo* field_info = _table_info->get_field_ptr(slot.field_id());
+        if (_pri_field_ids.count(field_info->id) == 0) {
+            _field_ids[field_info->id] = field_info;
+        }
+   }
+    int ret = 0;
+    std::string pk_str;
+    ret = get_lock_row(state, record, &pk_str);
+    if (ret == -3) {
+        //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
+        return 0;
+    }else if (ret == -2) {
+        // row deleted
+        return 0;
+    } else if (ret != 0) {
+        DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
+        return -1;
+    }
+
+    // 重新计算受影响field_ids与affected_indices
+    std::set<int32_t> affect_field_ids;
+    for (size_t i = 0; i < _update_exprs.size(); i++) {
+        auto& slot = _update_slots[i];
+        auto expr = _update_exprs[i];
+        const FieldDescriptor* field = record->get_field_by_tag(slot.field_id());
+        auto old_value = record->get_value(field);
+        auto new_value = expr->get_value(row).cast_to(slot.slot_type());
+        if (0 == old_value.compare(new_value)) {
+            record->clear_field(field);
+        } else {
+            affect_field_ids.insert(slot.field_id());
+            record->set_value(record->get_field_by_tag(slot.field_id()),
+                    expr->get_value(row).cast_to(slot.slot_type()));
+        }
+    }
+    //临时存放被影响的index_id
+    std::vector<int64_t> affected_indices;
+    for (auto index_id : _affected_index_ids) {
+        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        IndexInfo& info = *info_ptr;
+        bool has_id = false;
+        for (auto& field : info.fields) {
+            if (affect_field_ids.count(field.id) == 1) {
+                has_id = true;
+                break;
+            }
+        }
+        if (has_id) {
+            if (info.id == _table_id) { // never happen
+                _affect_primary = true;
+                break;
+            } else {
+                affected_indices.push_back(index_id);
+            }
+        }
+    }
+    _affected_index_ids.swap(affected_indices);
+
+    ret = remove_row(state, record, pk_str);
+    if (ret < 0) {
+        DB_WARNING_STATE(state, "remove_row fail");
+        return -1;
+    } else if (ret == 0) {
+        // update null row
+        return 0;
+    }
+
     ret = insert_row(state, record, true);
     if (ret < 0) {
         DB_WARNING_STATE(state, "insert_row fail");
