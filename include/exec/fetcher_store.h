@@ -26,7 +26,7 @@ enum ErrorType {
     E_WARNING,
     E_FATAL,
     E_BIG_SQL,
-    E_RETURN    // primary region已经rollback是使用
+    E_RETURN    // primary region已经rollback时使用
 };
 
 struct TraceDesc {

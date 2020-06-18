@@ -241,7 +241,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ZEROFILL
     NATURAL
 %token<string>
-    /* The following tokens belong to ReservedKeywork. */
+    /* The following tokens belong to ReservedKeyword. */
     CURRENT_DATE
     BOTH
     CURRENT_TIME

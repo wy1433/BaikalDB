@@ -668,8 +668,8 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     return 0;
 }
 
-ExprValue hll_init() {
-    ExprValue hll(pb::HLL);
+baikaldb::ExprValue hll_init() {
+    baikaldb::ExprValue hll(pb::HLL);
     int sparselen = HLL_HDR_SIZE +
                     (((HLL_REGISTERS+(HLL_SPARSE_XZERO_MAX_LEN-1)) /
                      HLL_SPARSE_XZERO_MAX_LEN)*2);
