@@ -46,7 +46,7 @@ int UnionPlanner::plan() {
     if (0 != parse_limit()) {
         return -1;        
     }
-
+    // exec node: union(selects) -> group by -> order by -> limit -> packet
     if (0 != create_common_plan_node()) {
         return -1;
     }

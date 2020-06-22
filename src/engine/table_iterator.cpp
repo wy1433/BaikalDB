@@ -521,7 +521,7 @@ int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord*
                      _non_pk_fields[i]->default_value.c_str());
             continue;
         }
-        if (!_fits_prefix(iter_key, field_id)) {
+        if (!_fits_prefix(iter->key(), field_id)) {
             if (record != nullptr) {
                 (*record)->set_default_value(*_non_pk_fields[i]);
             } else {
