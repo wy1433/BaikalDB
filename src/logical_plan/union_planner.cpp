@@ -78,6 +78,7 @@ int UnionPlanner::gen_select_stmts_plan() {
         select_ctx->user_info = _ctx->user_info;
         select_ctx->row_ttl_duration = _ctx->row_ttl_duration;
         select_ctx->get_runtime_state()->set_client_conn(client);
+        select_ctx->client_conn = client;
         select_ctx->sql = select->to_string();
         std::unique_ptr<LogicalPlanner> planner;
         planner.reset(new SelectPlanner(select_ctx.get()));
