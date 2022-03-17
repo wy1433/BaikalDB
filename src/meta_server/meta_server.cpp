@@ -213,6 +213,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_TTL_DURATION
             || request->op_type() == pb::OP_UPDATE_STATISTICS
             || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
+            || request->op_type() == pb::OP_MODIFY_LEARNER_RESOURCE_TAG
             || request->op_type() == pb::OP_ADD_INDEX
             || request->op_type() == pb::OP_DROP_INDEX
             || request->op_type() == pb::OP_DELETE_DDLWORK

@@ -86,6 +86,8 @@ void HandleHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_REGION_ADJUSTKEY] = std::bind(&HandleHelper::_handle_region_adjustkey,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_TABLE_LEARNER_RESOURCE_TAG] = std::bind(&HandleHelper::_handle_table_learner_resource_tag,
+            this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
 
@@ -1371,6 +1373,48 @@ bool HandleHelper::_handle_store_rm_txn(const SmartSocket& client, const std::ve
     interact.send_request("query", req, res);
     DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), req.ShortDebugString().c_str());
     if(!_make_response_packet(client, res.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+bool HandleHelper::_handle_table_learner_resource_tag(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if(!client || !client->user_info) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    std::string namespace_name = client->user_info->namespace_;
+    std::string db = client->current_db;
+    std::string table = "";
+    std::vector<std::string> resource_tags;
+    if (split_vec.size() == 3) {
+        table = split_vec[2];
+    } else if (split_vec.size() == 4) {
+        table = split_vec[2];
+        boost::split(resource_tags, split_vec[3], boost::is_any_of(","), boost::token_compress_on);
+    } else {
+        client->state = STATE_ERROR;
+        DB_FATAL("param invalid");
+        return false;
+    }
+
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_MODIFY_LEARNER_RESOURCE_TAG);
+    auto info = request.mutable_table_info();
+    info->set_table_name(table);
+    info->set_database(db);
+    info->set_namespace_name(namespace_name);
+    for (auto& tag : resource_tags) {
+        tag = remove_quote(tag.c_str(), '"');
+        tag = remove_quote(tag.c_str(), '\'');
+        info->add_learner_resource_tags(tag);
+    }
+
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if(!_make_response_packet(client, response.ShortDebugString())) {
         return false;
     }
     client->state = STATE_READ_QUERY_RESULT;

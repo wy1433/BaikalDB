@@ -89,6 +89,8 @@ const std::string SQL_HANDLE_NETWORK_BALANCE            = "network_balance";
 const std::string SQL_HANDLE_STORE_RM_TXN               = "store_rm_txn";
 // handle region_adjustkey tableID regionID start_key_region_id end_key_region_id 
 const std::string SQL_HANDLE_REGION_ADJUSTKEY           = "region_adjustkey";
+// handle table_learner_resource_tag tableName tag1,tag2...
+const std::string SQL_HANDLE_TABLE_LEARNER_RESOURCE_TAG = "table_learner_resource_tag";
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -169,6 +171,8 @@ private:
     // handle create_namespace NamespaceName
     bool _handle_create_namespace(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _send_store_raft_control_request(const SmartSocket& client, pb::RaftControlRequest& req, pb::RegionInfo& info);
+    // sql: handle table_learner_resource_tag tableName tag1,tag2...
+    bool _handle_table_learner_resource_tag(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _make_response_packet(const SmartSocket& client, const std::string& response);
     int _make_common_resultset_packet(const SmartSocket& sock,
             std::vector<ResultField>& fields,

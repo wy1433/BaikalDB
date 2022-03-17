@@ -852,6 +852,39 @@ void TableManager::update_resource_tag(const pb::MetaManagerRequest& request,
     DB_NOTICE("update table internal success, request:%s", request.ShortDebugString().c_str());
 }
 
+void TableManager::update_learner_resource_tag(const pb::MetaManagerRequest& request,
+                                       const int64_t apply_index,
+                                       braft::Closure* done) {
+    int64_t table_id;
+    if (check_table_exist(request.table_info(), table_id) != 0) {
+        DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
+    mem_schema_pb.clear_learner_resource_tags();
+    for (auto& resource_tag : request.table_info().learner_resource_tags()) {
+        if (!ClusterManager::get_instance()->check_resource_tag_exist(resource_tag)) {
+            DB_WARNING("check resource_tag exist fail, request:%s", request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "resource_tag not exist");
+            return ;
+        }
+        mem_schema_pb.add_learner_resource_tags(resource_tag);
+    }
+
+    mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+    auto ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
+    if (ret < 0) {
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    set_table_pb(mem_schema_pb);
+    std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
+    put_incremental_schemainfo(apply_index, schema_infos);
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("update table internal success, request:%s", request.ShortDebugString().c_str());
+}
+
 void TableManager::update_dists(const pb::MetaManagerRequest& request,
                                 const int64_t apply_index, 
                                 braft::Closure* done) {

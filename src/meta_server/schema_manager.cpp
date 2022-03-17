@@ -115,6 +115,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_UPDATE_DISTS:
     case pb::OP_UPDATE_TTL_DURATION:
     case pb::OP_MODIFY_RESOURCE_TAG: 
+    case pb::OP_MODIFY_LEARNER_RESOURCE_TAG:
     case pb::OP_ADD_INDEX:
     case pb::OP_DROP_INDEX: 
     case pb::OP_ADD_LEARNER:

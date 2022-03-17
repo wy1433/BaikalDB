@@ -296,7 +296,7 @@ std::string to_string(uint64_t number)
 
 std::string remove_quote(const char* str, char quote) {
     uint32_t len = strlen(str);
-    if (len > 2 && str[0] == quote && str[len-1] == quote) {
+    if (len >= 2 && str[0] == quote && str[len-1] == quote) {
         return std::string(str + 1, len - 2);
     } else {
         return std::string(str);

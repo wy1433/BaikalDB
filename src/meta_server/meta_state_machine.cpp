@@ -423,6 +423,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->update_resource_tag(request, iter.index(), done);
             break;            
         }
+        case pb::OP_MODIFY_LEARNER_RESOURCE_TAG: {
+            TableManager::get_instance()->update_learner_resource_tag(request, iter.index(), done);
+            break;
+        }
         case pb::OP_ADD_INDEX: {
             TableManager::get_instance()->add_index(request, iter.index(), done);
             break;

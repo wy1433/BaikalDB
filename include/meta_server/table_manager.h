@@ -153,6 +153,7 @@ public:
     void update_dists(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_ttl_duration(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_resource_tag(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void update_learner_resource_tag(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_table_comment(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
 
     void add_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);

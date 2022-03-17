@@ -128,4 +128,5 @@ enum OpType {
     OP_CLOSE_NETWORK_SEGMENT_BALANCE        = 190; // 关闭一个resource tag的按网段进行balance
     OP_UPDATE_TABLE_COMMENT                 = 191; //修改表的comment
     OP_SWAP_TABLE                           = 192; //原子交换两个表名
+    OP_MODIFY_LEARNER_RESOURCE_TAG          = 193;
 };
