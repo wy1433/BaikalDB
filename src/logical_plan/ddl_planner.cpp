@@ -174,6 +174,11 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
                         _ctx->stat_info.error_msg << "Invalid default value for '" << column->name->name.value << "'";
                         return -1;
                     }
+                } else if (field->default_value() == "(current_timestamp())" && !is_current_timestamp_specic(data_type)) {
+                    DB_WARNING("Invalid default value for '%s'", column->name->name.value);
+                    _ctx->stat_info.error_code = ER_INVALID_DEFAULT;
+                    _ctx->stat_info.error_msg << "Invalid default value for '" << column->name->name.value << "'";
+                    return -1;
                 }
                 field->set_default_value(lit->to_string());
             }
