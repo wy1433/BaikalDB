@@ -372,9 +372,10 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         ExprNode* e = expr->transfer();
         if (e != expr) {
             delete expr;
-            _conjuncts[idx++] = e;
+            _conjuncts[idx] = e;
             expr = e;
         }
+        idx++;
         if (expr->children_size() < 2) {
             continue;
         }
