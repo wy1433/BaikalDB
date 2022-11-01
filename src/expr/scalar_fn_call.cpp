@@ -20,6 +20,7 @@
 #include "predicate.h"
 
 namespace baikaldb {
+DECLARE_bool(dateformat_compatible);
 DEFINE_bool(open_nonboolean_sql_forbid, false, "open nonboolean sqls forbid default:false");
 int ScalarFnCall::init(const pb::ExprNode& node) {
     int ret = 0;
@@ -183,6 +184,16 @@ int ScalarFnCall::open() {
     _fn_call = fn_manager->get_object(_fn.name());
     if (node_type() == pb::FUNCTION_CALL && _fn_call == NULL) {
         DB_WARNING("fn call is null, name:%s", _fn.name().c_str());
+    }
+
+    if (FLAGS_dateformat_compatible && node_type() == pb::FUNCTION_CALL && _fn.name() == "date_format") {
+        if (children_size() == 2 && children(1)->is_literal()) {
+            std::string f = children(1)->get_value(nullptr).get_string();
+            if (f.find("%M") != f.npos) {
+                DB_WARNING("dateformat compatible: %s", f.c_str());
+            }
+        }
+
     }
     return 0;
 }
