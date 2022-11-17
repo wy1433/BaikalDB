@@ -27,6 +27,7 @@ namespace baikaldb {
 
 DEFINE_bool(reverse_seek_first_level, false, "reverse index seek first level, default(false)");
 DEFINE_int32(in_predicate_check_threshold, 4096, "in predicate threshold to check memory, default(4096)");
+DEFINE_bool(ignore_new_field_error, false, "ignore field not found when add field return NULL");
 
 int RocksdbScanNode::choose_index(RuntimeState* state) {
     // 做完logical plan还没有索引
@@ -95,7 +96,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
     // 以baikaldb的判断为准
     if (pos_index.is_covering_index() && _is_covering_index == false) {
-	DB_WARNING("covering_index conflict, index_id = [%d]", _index_id);
+        DB_WARNING("covering_index conflict, index_id = [%d]", _index_id);
         _is_covering_index = true;
     }
 
@@ -423,6 +424,9 @@ int RocksdbScanNode::open(RuntimeState* state) {
     for (auto& slot : _tuple_desc->slots()) {
         if (slot.field_id() > _field_slot.size() - 1) {
             DB_WARNING("vector out of range, region_id: %ld, field_id: %d", _region_id, slot.field_id());
+            if (FLAGS_ignore_new_field_error) {
+                continue;
+            }
             return -1;
         }
         _field_slot[slot.field_id()] = slot.slot_id();
