@@ -2120,25 +2120,13 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | CONVERT '(' Expr ',' CHAR ')' {
+    | CONVERT '(' Expr ',' StringType ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | CONVERT '(' Expr ',' VARCHAR ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "cast_to_string";
-        fun->children.push_back($3, parser->arena);
-        $$ = fun;
-    }
-    | CAST '(' Expr AS CHAR ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "cast_to_string";
-        fun->children.push_back($3, parser->arena);
-        $$ = fun;
-    }
-    | CAST '(' Expr AS VARCHAR ')' {
+    | CAST '(' Expr AS StringType ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
