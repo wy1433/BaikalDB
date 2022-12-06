@@ -61,6 +61,8 @@ const std::string SQL_SHOW_CHARACTER_SET         = "character";             // s
 const std::string SQL_SHOW_INDEX                 = "index";                 // show index
 const std::string SQL_SHOW_INDEXES               = "indexes";               // show indexes; same as `show index`
 const std::string SQL_SHOW_KEYS                  = "keys";                  // show keys; same as `show index`
+const std::string SQL_SHOW_NAMESPACES            = "namespaces";            // show namespaces;
+const std::string SQL_SHOW_GRANTS                = "grants";                // show grants for username;
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -145,6 +147,11 @@ private:
     bool _show_engines(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_charset(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_index(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show namespaces;
+    bool _show_namespaces(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show grants for username;
+    bool _show_grants(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
             std::vector<ResultField>& fields,

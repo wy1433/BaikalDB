@@ -23,8 +23,56 @@
 #include "proto/meta.interface.pb.h"
 #include "proto/plan.pb.h"
 #include "common.h"
+#include "parser.h"
 
+using namespace parser;
 namespace baikaldb {
+inline uint32_t get_op_require_acl(pb::OpType op_type) {
+    switch (op_type) {
+        case pb::OP_SELECT:
+        case pb::OP_UNION:
+            return SELECT_ACL;
+        case pb::OP_INSERT:
+            return INSERT_ACL;
+        case pb::OP_DELETE:
+        case pb::OP_TRUNCATE_TABLE:
+            return DELETE_ACL;
+        case pb::OP_UPDATE:
+            return UPDATE_ACL;
+        case pb::OP_LOAD:
+            return FILE_ACL;
+        case pb::OP_CREATE_NAMESPACE:
+        case pb::OP_CREATE_DATABASE:
+        case pb::OP_CREATE_TABLE:
+            return CREATE_ACL;
+        case pb::OP_DROP_NAMESPACE:
+        case pb::OP_DROP_DATABASE:
+        case pb::OP_DROP_TABLE:
+            return DROP_ACL;
+        case pb::OP_MODIFY_NAMESPACE:
+        case pb::OP_MODIFY_DATABASE:
+        case pb::OP_RENAME_TABLE:
+        case pb::OP_ADD_FIELD:
+        case pb::OP_DROP_FIELD:
+        case pb::OP_RENAME_FIELD:
+        case pb::OP_MODIFY_FIELD:
+            return ALTER_ACL;
+        case pb::OP_ADD_INDEX:
+        case pb::OP_DROP_INDEX:
+        case pb::OP_RENAME_INDEX:
+            return INDEX_ACL;
+        case pb::OP_CREATE_USER:
+        case pb::OP_DROP_USER:
+        case pb::OP_MODIFY_USER:
+            return CREATE_USER_ACL;
+        case pb::OP_ADD_PRIVILEGE :
+        case pb::OP_DROP_PRIVILEGE:
+            return GRANT_ACL;
+        default:
+            return 0U;
+    }
+}
+
 struct UserInfo {
 public:
     UserInfo() : query_count(0) {
@@ -80,7 +128,7 @@ public:
         return false;
     }
 
-    bool allow_op(pb::OpType op_type, int64_t db, int64_t tbl) {
+    bool allow_op_v1(pb::OpType op_type, int64_t db, int64_t tbl) {
         if (op_type == pb::OP_SELECT) {
             return allow_read(db, tbl);
         } else {
@@ -97,6 +145,39 @@ public:
             }
         }
         return true;
+    }
+
+    bool acl_v2_is_valid() {
+        return acl_user != 0 || acl_database.size() > 0 || acl_table.size() > 0;
+    }
+
+    bool allow_op_v2(pb::OpType op_type, int64_t db, int64_t tbl) {
+        uint32_t acl_require = get_op_require_acl(op_type);
+        return contain_privs(acl_require, db, tbl);
+    }
+    bool contain_privs(uint32_t acl_require, int64_t db, int64_t tbl) {
+        if (acl_require == (acl_require & acl_user)) {
+            return true;
+        }
+        if ((db != -1) && acl_database.count(db) > 0) {
+            if (acl_require == (acl_require & acl_database[db])) {
+                return true;
+            }
+        }
+        if ((tbl != -1) && acl_table.count(tbl) > 0) {
+            if (acl_require == (acl_require & acl_table[tbl])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool allow_op(pb::OpType op_type, int64_t db, int64_t tbl) {
+        if (acl_v2_is_valid()) { // 优先用v2版本权限控制
+            return allow_op_v2(op_type, db, tbl);
+        } else { // 兼容v1版本权限控制
+            return allow_op_v1(op_type, db, tbl);
+        }
     }
 
 public:
@@ -118,6 +199,12 @@ public:
     std::atomic<uint32_t>    query_count;
     std::map<int64_t, pb::RW> database;
     std::map<int64_t, pb::RW> table;
+
+    // TODO: 'user_name'@'host_name'， 按照IP授权
+    uint32_t acl_user = 0;
+    std::map<int64_t, uint32_t> acl_database; // <database_id, acl>
+    std::map<int64_t, uint32_t> acl_table; // <table_id, acl>
+
     // show databases使用
     std::set<int64_t> all_database;
     std::unordered_set<std::string> auth_ip_set;

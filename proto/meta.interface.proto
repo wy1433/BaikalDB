@@ -16,6 +16,7 @@ message NameSpaceInfo {
     optional int64 version                 = 4;
     optional bool deleted                  = 5;
     optional string resource_tag           = 6;
+    optional bool  if_exist                = 7;
 };
 
 message DataBaseInfo {
@@ -254,6 +255,7 @@ message PrivilegeDatabase {
     optional int64 database_id = 2;
     optional RW database_rw    = 3;
     optional bool force        = 4;
+    optional uint32 acl         = 5; //权限控制列表,bitmap
 };
 
 message PrivilegeTable {
@@ -263,6 +265,7 @@ message PrivilegeTable {
     optional int64 table_id    = 4;
     optional RW table_rw       = 5;
     optional bool force        = 6;
+    optional uint32 acl         = 7; //权限控制列表,bitmap
 };
 
 message UserPrivilege {
@@ -277,6 +280,8 @@ message UserPrivilege {
     optional int64 version                        = 9;
     optional bool encrypt                         = 10; //加密用户才能访问加密列
     optional bool need_auth_addr                  = 11;
+    optional uint32 acl                           = 12; //权限控制列表,bitmap
+    optional bool  if_exist                       = 13;
 };
 
 //集群信息
