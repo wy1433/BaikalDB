@@ -1,5 +1,6 @@
 syntax = "proto2";
 package mysub;
+option cc_enable_arenas = true;
 enum MysqlType {
     MYSQL_TYPE_DECIMAL = 0; //not exist in binlog.
     MYSQL_TYPE_TINY = 1;

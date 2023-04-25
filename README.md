@@ -1,5 +1,7 @@
 ## BaikalDB：A Distributed HTAP Database
-[![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
+[![GitHub license](https://img.shields.io/github/license/baidu/BaikalDB?style=social)](https://github.com/baidu/BaikalDB/blob/master/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/baidu/BaikalDB?style=social)](https://github.com/baidu/BaikalDB/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/baidu/BaikalDB?style=social)](https://github.com/baidu/BaikalDB/issues)
 
 BaikalDB supports sequential and randomised realtime read/write of structural data in petabytes-scale.
 BaikalDB is compatible with MySQL protocol and it supports MySQL style SQL dialect, by which users can migrate their data storage from MySQL to BaikalDB seamlessly.
@@ -21,6 +23,6 @@ baidu/BaikalDB is licensed under the Apache License 2.0
 * Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
 
 ## WeiXin Group
-添加以下管理员加群，备注baikaldb
+添加管理员olivaw2077帮忙加群，备注baikaldb
 
 <img src="./qrcode.jpeg" width="320" />

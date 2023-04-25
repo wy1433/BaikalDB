@@ -54,6 +54,52 @@ int main(int argc, char* argv[])
 }
 
 namespace baikaldb {
+
+class TimePeriodChecker {
+public:
+    TimePeriodChecker(int start_hour, int end_hour) : _start_hour(start_hour),_end_hour(end_hour) {}
+
+    bool now_in_interval_period(int now) {
+        /*struct tm ptm;
+        time_t timep = time(NULL);
+        localtime_r(&timep, &ptm);
+        int now = ptm.tm_hour;*/
+        // 跨夜
+        if (_end_hour < _start_hour) {
+            if (now >= _end_hour && now < _start_hour) {
+                return false;
+            }
+            return true;
+        } else {
+            if (now >= _start_hour && now < _end_hour) {
+                return true;
+            }
+            return false;  
+        }
+    }
+private:
+    int _start_hour;
+    int _end_hour;
+};
+
+TEST(test_TimePeriodChecker, timechecker) {
+    TimePeriodChecker tc1(0, 7);
+    TimePeriodChecker tc2(8, 17);
+    TimePeriodChecker tc3(18, 7);
+
+    EXPECT_EQ(true, tc1.now_in_interval_period(1));
+    EXPECT_EQ(false, tc1.now_in_interval_period(8));
+    EXPECT_EQ(false, tc1.now_in_interval_period(18));
+
+    EXPECT_EQ(false, tc2.now_in_interval_period(1));
+    EXPECT_EQ(true, tc2.now_in_interval_period(8));
+    EXPECT_EQ(false, tc2.now_in_interval_period(18));
+
+    EXPECT_EQ(true, tc3.now_in_interval_period(1));
+    EXPECT_EQ(false, tc3.now_in_interval_period(8));
+    EXPECT_EQ(true, tc3.now_in_interval_period(18));
+}
+
 TEST(test_channel, channel) {
     int64_t aa = 3600 * 1000 * 1000;
     int64_t bb = 3600 * 1000 * 1000L;
@@ -197,6 +243,25 @@ TEST(test_stripslashes, case_all) {
 //     std::cout << sizeof(raft::NodeOptions) << " " << sizeof(std::string) << " " << sizeof(size_t) << " "
 //     << sizeof(raft::PeerId) << sizeof(butil::EndPoint) << "\n"; 
 // }
+TEST(test_bthread_timer, timer) {
+    
+    for (int i = 0; i < 10; i++) {
+        BthreadTimer tm;
+        tm.run(100 * i, [i] () {
+            static thread_local int a;
+            int* b = &a;
+            *b = i;
+            DB_NOTICE("start timer test %d, %d, %p", i, *b, b);
+            bthread_usleep(1000 * 1000);
+            DB_NOTICE("end timer test %d, %d, %p %p", i, *b, b, &a);
+        });
+        if (i == 7) {
+            tm.stop();
+        }
+    }
+    sleep(3);
+}
+
 
 TEST(test_cond, wait) {
     
@@ -356,10 +421,12 @@ TEST(ThreadSafeMap, count) {
 TEST(BvarMap, bvarmap) {
     bvar::Adder<BvarMap> bm;
     std::map<int32_t, int> field_range_type;
+    uint64_t parent_sign = 2385825078143366794;
+    std::set<uint64_t> subquery_signs = {8394144613061275097, 8919421716185942419};
     //bm << BvarMap(std::make_pair("abc", 1));
-    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 1, field_range_type, 1);
-    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 1, field_range_type, 1);
-    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 1, field_range_type, 1);
+    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 1, field_range_type, 1, parent_sign, subquery_signs);
+    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 1, field_range_type, 1, parent_sign, subquery_signs);
+    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 1, field_range_type, 1, parent_sign, subquery_signs);
     std::cout << bm.get_value();
 }
 

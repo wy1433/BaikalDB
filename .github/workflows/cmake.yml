@@ -5,13 +5,13 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
     - uses: actions/checkout@v2
     - name: Cache cmake modules
       uses: actions/cache@v2
       with:
-        key: cmake-buildenv4
+        key: cmake-buildenv3
         path: |
            buildenv
     - name: Install Dependencies
