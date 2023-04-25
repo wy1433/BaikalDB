@@ -51,8 +51,8 @@ void Backup::backup_datainfo(brpc::Controller* cntl, int64_t log_index) {
         std::string{"region_metainfo_backup_"} + std::to_string(_region_id) + ".sst";
 
     ON_SCOPE_EXIT(([&backup_info]() {
-        std::remove(backup_info.data_info.path.c_str());
-        std::remove(backup_info.meta_info.path.c_str());
+        butil::DeleteFile(butil::FilePath(backup_info.data_info.path), false); 
+        butil::DeleteFile(butil::FilePath(backup_info.meta_info.path), false); 
     }));
     
     if (dump_sst_file(backup_info) != 0) {
@@ -191,20 +191,20 @@ int Backup::backup_metainfo_to_file(const std::string& path, int64_t& file_size)
     return 0;
 }
 
-void Backup::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest_sst) {
+int Backup::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest_sst) {
 
     BackupInfo backup_info;
     backup_info.meta_info.path = std::to_string(_region_id) + ".upload.meta.sst";
     backup_info.data_info.path = std::to_string(_region_id) + ".upload.data.sst";
 
     ON_SCOPE_EXIT(([&backup_info]() {
-        std::remove(backup_info.data_info.path.c_str());
-        std::remove(backup_info.meta_info.path.c_str());
+        butil::DeleteFile(butil::FilePath(backup_info.data_info.path), false); 
+        butil::DeleteFile(butil::FilePath(backup_info.meta_info.path), false); 
     }));
 
     if (upload_sst_info(cntl, backup_info) != 0) {
         cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
-        return;
+        return -1;
     }
 
     if (auto region_ptr = _region.lock()) {
@@ -217,21 +217,7 @@ void Backup::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest
         if (ret != 0) {
             cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
             DB_FATAL("_real_writing_cond wait timeout, region_id: %ld", _region_id);
-            return;
-        }
-
-        ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
-        if (ret != 0) {
-            cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
-            DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
-            return;
-        }
-
-        DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
-        if (!ingest_store_latest_sst) {
-            DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
-            cntl->http_response().set_status_code(brpc::HTTP_STATUS_OK);
-            return;
+            return -1;
         }
 
         BackupInfo latest_backup_info;
@@ -239,29 +225,45 @@ void Backup::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest
         latest_backup_info.data_info.path = std::to_string(_region_id) + ".latest.data.sst";
 
         ON_SCOPE_EXIT(([&latest_backup_info]() {
-            std::remove(latest_backup_info.data_info.path.c_str());
-            std::remove(latest_backup_info.meta_info.path.c_str());
+            butil::DeleteFile(butil::FilePath(latest_backup_info.data_info.path), false); 
+            butil::DeleteFile(butil::FilePath(latest_backup_info.meta_info.path), false); 
         }));
 
         if (dump_sst_file(latest_backup_info) != 0) {
             cntl->http_response().set_status_code(brpc::HTTP_STATUS_PARTIAL_CONTENT);
             DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
-            return;
+            return -1;
+        }
+
+        ret = region_ptr->ingest_sst_backup(backup_info.data_info.path, backup_info.meta_info.path);
+        if (ret != 0) {
+            cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+            DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
+            return -1;
+        }
+
+        DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
+        if (!ingest_store_latest_sst) {
+            DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
+            cntl->http_response().set_status_code(brpc::HTTP_STATUS_OK);
+            return -1;
         }
 
         DB_NOTICE("region[%ld] ingest latest data.", _region_id);
-        ret = region_ptr->ingest_sst(latest_backup_info.data_info.path, latest_backup_info.meta_info.path);
+        ret = region_ptr->ingest_sst_backup(latest_backup_info.data_info.path, latest_backup_info.meta_info.path);
         if (ret == 0) {
             cntl->http_response().set_status_code(brpc::HTTP_STATUS_OK);
             DB_NOTICE("upload region[%ld] ingest latest sst success.", _region_id);
+            return 0;
         } else {
             cntl->http_response().set_status_code(brpc::HTTP_STATUS_PARTIAL_CONTENT);
             DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
+            return -1;
         }        
     } else {
         cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
         DB_WARNING("region_%ld is quit.", _region_id);
-        return;
+        return -1;
     }
 }
 
@@ -362,8 +364,8 @@ int Backup::backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index, Smar
     });
 
     ON_SCOPE_EXIT(([&backup_info]() {
-        std::remove(backup_info.data_info.path.c_str());
-        std::remove(backup_info.meta_info.path.c_str());
+        butil::DeleteFile(butil::FilePath(backup_info.data_info.path), false); 
+        butil::DeleteFile(butil::FilePath(backup_info.meta_info.path), false); 
     }));
     
     if (dump_sst_file(backup_info) != 0) {
@@ -380,7 +382,35 @@ int Backup::backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index, Smar
 }
 void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_store_latest_sst, 
     const pb::BackupRequest* request, pb::BackupResponse* response) {
+        
+    // 限速
+    int ret = Concurrency::get_instance()->upload_sst_streaming_concurrency.increase_timed_wait(1000 * 1000 * 5); 
+    if (ret < 0) {
+        response->set_errcode(pb::RETRY_LATER);
+        DB_WARNING("upload sst fail, concurrency limit wait timeout, region_id: %lu", _region_id);
+        return;
+    }
+    bool ingest_stall = RocksWrapper::get_instance()->is_ingest_stall();
+    if (ingest_stall) {
+        response->set_errcode(pb::RETRY_LATER);
+        DB_WARNING("upload sst fail, level0 sst num limit, region_id: %lu", _region_id);
+        return;
+    }
 
+    auto region_ptr = _region.lock();
+    if (region_ptr == nullptr) {
+        DB_WARNING("upload sst fail, get lock fail, region_id: %lu", _region_id);
+        return;
+    }
+    int64_t data_sst_to_process_size = request->data_sst_to_process_size();
+    if (data_sst_to_process_size == 0) {
+        // sst备份恢复, 将状态置为doing, 恢复后做一次snapshot,否则add peer异常
+        if (region_ptr->make_region_status_doing() < 0) {
+            response->set_errcode(pb::RETRY_LATER);
+            DB_WARNING("upload sst fail, make region status doing fail, region_id: %lu", _region_id);
+            return;
+        }
+    }
     BackupInfo backup_info;
     // path加个随机数，防多个sst冲突
     int64_t rand = butil::gettimeofday_us() + butil::fast_rand();
@@ -389,23 +419,31 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
     std::shared_ptr<StreamReceiver> receiver(new StreamReceiver);
     if (!receiver->set_info(backup_info)) {
         DB_WARNING("region_%ld set backup info error.", _region_id);
+        if (data_sst_to_process_size == 0) {
+            region_ptr->reset_region_status();
+        }
         return;
     }
-
+    brpc::StreamId id = request->streaming_id();
     int64_t row_size = request->row_size(); // 需要调整的num_table_lines
-    int64_t data_sst_to_process_size = request->data_sst_to_process_size();
     if (data_sst_to_process_size > 0) {
         receiver->set_only_data_sst(data_sst_to_process_size);
     }
 
-    Concurrency::get_instance()->upload_sst_streaming_concurrency.increase_wait();
+    ScopeGuard auto_decrease([&backup_info, data_sst_to_process_size, region_ptr]() {
+        butil::DeleteFile(butil::FilePath(backup_info.data_info.path), false); 
+        butil::DeleteFile(butil::FilePath(backup_info.meta_info.path), false); 
+        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
+        if (data_sst_to_process_size == 0) {
+            region_ptr->reset_region_status();
+        }
+    });
     brpc::StreamId sd;
     brpc::StreamOptions stream_options;
     stream_options.handler = receiver.get();
     stream_options.max_buf_size = FLAGS_streaming_max_buf_size;
     stream_options.idle_timeout_ms = FLAGS_streaming_idle_timeout_ms; 
     if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
-        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
         cntl->SetFailed("Fail to accept stream");
         DB_WARNING("fail to accept stream.");
         return;
@@ -415,8 +453,8 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
                _region_id, data_sst_to_process_size, backup_info.data_info.path.c_str(),
                butil::endpoint2str(cntl->remote_side()).c_str(), sd);
     //async
-    if (auto region_ptr = _region.lock()) {
-        brpc::StreamId id = request->streaming_id();
+    if (region_ptr != nullptr) {
+        auto_decrease.release();
         Bthread streaming_work{&BTHREAD_ATTR_NORMAL};
         streaming_work.run(
             [this, region_ptr, ingest_store_latest_sst, data_sst_to_process_size, sd, receiver, backup_info, row_size, id]() {
@@ -435,18 +473,24 @@ int Backup::upload_sst_info_streaming(
     brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
     bool ingest_store_latest_sst, int64_t data_sst_to_process_size, const BackupInfo& backup_info,
     SmartRegion region_ptr, brpc::StreamId client_sd) {
+    ScopeGuard auto_decrease([]() {
+        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
+    });
     TimeCost time_cost;
     region_ptr->_multi_thread_cond.increase();
-    ON_SCOPE_EXIT([region_ptr]() {
-        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
-        region_ptr->_multi_thread_cond.decrease_signal();
-    });
-
     DB_NOTICE("upload datainfo region_id[%ld]", _region_id);
 
-    ON_SCOPE_EXIT(([&backup_info]() {
-                std::remove(backup_info.data_info.path.c_str());
-                std::remove(backup_info.meta_info.path.c_str());
+    bool upload_success = false;
+    ON_SCOPE_EXIT(([&backup_info, data_sst_to_process_size, &upload_success, region_ptr]() {
+                butil::DeleteFile(butil::FilePath(backup_info.data_info.path), false); 
+                butil::DeleteFile(butil::FilePath(backup_info.meta_info.path), false); 
+                region_ptr->_multi_thread_cond.decrease_signal();
+                if (data_sst_to_process_size == 0) {
+                    if (upload_success) {
+                        region_ptr->do_snapshot();
+                    }
+                    region_ptr->reset_region_status();
+                }
                 }));
 
     while (receiver->get_status() == pb::StreamState::SS_INIT) {
@@ -493,8 +537,8 @@ int Backup::upload_sst_info_streaming(
 
     ON_SCOPE_EXIT(([&latest_backup_info, ingest_store_latest_sst]() { 
         if (ingest_store_latest_sst) {
-            std::remove(latest_backup_info.data_info.path.c_str());
-            std::remove(latest_backup_info.meta_info.path.c_str());
+            butil::DeleteFile(butil::FilePath(latest_backup_info.data_info.path), false); 
+            butil::DeleteFile(butil::FilePath(latest_backup_info.meta_info.path), false); 
         }
     }));
 
@@ -504,12 +548,13 @@ int Backup::upload_sst_info_streaming(
         return -1;
     }
 
-    int ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
+    int ret = region_ptr->ingest_sst_backup(backup_info.data_info.path, backup_info.meta_info.path);
     if (ret != 0) {
         DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
         return -1;
     }
 
+    upload_success = true;
     DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d] data sst size [%ld], time_cost [%ld]", 
         _region_id, int(ingest_store_latest_sst), data_sst_to_process_size, time_cost.get_time());
     if (!ingest_store_latest_sst) {
@@ -518,7 +563,7 @@ int Backup::upload_sst_info_streaming(
     }
 
     DB_NOTICE("region[%ld] ingest latest data.", _region_id);
-    ret = region_ptr->ingest_sst(latest_backup_info.data_info.path, latest_backup_info.meta_info.path);
+    ret = region_ptr->ingest_sst_backup(latest_backup_info.data_info.path, latest_backup_info.meta_info.path);
     if (ret == 0) {
         DB_NOTICE("upload region[%ld] ingest latest sst success.", _region_id);
     } else {

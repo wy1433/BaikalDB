@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <map>
+#include <cfloat>
 #include "scan_node.h"
 #include "filter_node.h"
 #include "join_node.h"
@@ -34,7 +35,7 @@ int64_t AccessPathMgr::select_index_common() {
         _multi_reverse_index.clear();
         _fulltext_use_arrow = false;
     }
-    
+
     for (auto& pair : _paths) {
         int64_t index_id = pair.first;
         const auto& path = pair.second;
@@ -49,7 +50,7 @@ int64_t AccessPathMgr::select_index_common() {
         }
         auto index_state = info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ",
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -100,12 +101,13 @@ int64_t AccessPathMgr::select_index_common() {
         DB_WARNING("choose arrow pb reverse index error.");
         return -1;
     }
+    if (_multi_reverse_index.size() > 0) {
+        return _multi_reverse_index[0];
+    }
+
     // ratio * 10(=0...9)相同的possible index中，按照PRIMARY, UNIQUE, KEY的优先级选择
     for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
         return iter->second;
-    }
-    if (_multi_reverse_index.size() > 0) {
-        return _multi_reverse_index[0];
     }
     return _table_id;
 }
@@ -152,6 +154,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         {"id", "1"},
         {"select_type", "SIMPLE"},
         {"table", "NULL"},
+        {"partitions", "NULL"},
         {"type", "NULL"},
         {"possible_keys", "NULL"},
         {"key", "NULL"},
@@ -162,7 +165,18 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         {"sort_index", "0"}
     };
     auto factory = SchemaFactory::get_instance();
-    explain_info["table"] = factory->get_table_info(_table_id).name;
+    auto table_info = SchemaFactory::get_instance()->get_table_info(_table_id);
+    explain_info["table"] = table_info.name;
+    if (table_info.partition_ptr != nullptr) {
+        std::string pt;
+        for (auto i : _partitions) {
+            pt += "p" + std::to_string(i) + ",";
+        }
+        if (!pt.empty()) {
+            pt.pop_back();
+            explain_info["partitions"] = pt;
+        }
+    }
     if (!has_index() && _scan_indexs.empty()) {
         explain_info["type"] = "ALL";
     } else {
@@ -188,7 +202,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         auto& pos_index = _main_path.path(index_id)->pos_index;
         if (pos_index.ranges_size() == 1) {
             int field_cnt = pos_index.ranges(0).left_field_cnt();
-            if (field_cnt == (int)index_info.fields.size() && 
+            if (field_cnt == (int)index_info.fields.size() &&
                     pos_index.ranges(0).left_pb_record() == pos_index.ranges(0).right_pb_record()) {
                 explain_info["type"] = "eq_ref";
                 if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
@@ -236,7 +250,7 @@ void AccessPathMgr::show_cost(std::vector<std::map<std::string, std::string>>& p
 }
 
 int64_t AccessPathMgr::select_index_by_cost() {
-    double min_cost = DBL_MAX;
+    double min_cost = std::numeric_limits<double>::max();
     int64_t min_idx = 0;
     bool multi_0_0 = false;
     bool multi_1_0 = false;
@@ -322,11 +336,11 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
 
         if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
-            if (outer_path->index_other_condition_count > 
+            if (outer_path->index_other_condition_count >
                 inner_path->index_other_condition_count) {
                 inner_path->is_possible = false;
                 return -2;
-            } else if (outer_path->index_other_condition_count < 
+            } else if (outer_path->index_other_condition_count <
                     inner_path->index_other_condition_count) {
                 outer_path->is_possible = false;
                 return -1;
@@ -343,7 +357,7 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
                         inner_path->is_possible = false;
                         return -2;
                     }
-                } else if (outer_path->index_info_ptr->length > 0 
+                } else if (outer_path->index_info_ptr->length > 0
                         && inner_path->index_info_ptr->length > 0) {
                     if (outer_path->index_info_ptr->length > inner_path->index_info_ptr->length) {
                         outer_path->is_possible = false;
@@ -377,9 +391,9 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
         }
 
         if (!inner_path->need_filter() && outer_path->is_sort_index <= inner_path->is_sort_index) {
-	    outer_path->is_possible = false;
+            outer_path->is_possible = false;
             return -1;
-	}
+        }
 
 
         if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
@@ -398,9 +412,9 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
         }
 
         if (!outer_path->need_filter() && inner_path->is_sort_index <= outer_path->is_sort_index) {
-	    inner_path->is_possible = false;
+            inner_path->is_possible = false;
             return -2;
-	}
+        }
 
         if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
             inner_path->is_possible = false;
@@ -424,7 +438,7 @@ void AccessPathMgr::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterato
             continue;
         }
 
-        if (inner_loop_iter->second->index_type != pb::I_PRIMARY && 
+        if (inner_loop_iter->second->index_type != pb::I_PRIMARY &&
             inner_loop_iter->second->index_type != pb::I_UNIQ &&
             inner_loop_iter->second->index_type != pb::I_KEY) {
             continue;
@@ -456,17 +470,17 @@ int64_t AccessPathMgr::pre_process_select_index() {
             continue;
         }
 
-        if (outer_loop_iter->second->index_type != pb::I_PRIMARY && 
+        if (outer_loop_iter->second->index_type != pb::I_PRIMARY &&
             outer_loop_iter->second->index_type != pb::I_UNIQ &&
             outer_loop_iter->second->index_type != pb::I_KEY) {
             continue;
         }
 
-        if (outer_loop_iter->second->index_type == pb::I_PRIMARY || 
+        if (outer_loop_iter->second->index_type == pb::I_PRIMARY ||
             outer_loop_iter->second->index_type == pb::I_UNIQ) {
             if (outer_loop_iter->second->index_field_ids.size() == outer_loop_iter->second->hit_index_field_ids.size()
                 && outer_loop_iter->second->is_eq_or_in()) {
-                // 主键或唯一键全命中，并且条件为eq或in，直接选择
+                // 主键或唯一键全命中，并且条件为eq或in，直接选择
                 if (!_use_force_index || outer_loop_iter->second->hint == AccessPath::FORCE_INDEX) {
                     return outer_loop_iter->second->index_id;
                 }
@@ -498,7 +512,7 @@ int64_t AccessPathMgr::pre_process_select_index() {
 int64_t AccessPathMgr::select_index() {
     int64_t select_idx = pre_process_select_index();
     if (select_idx == 0) {
-        if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
+        if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr
             && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext) {
             DB_DEBUG("table %ld has statistics", _table_id);
             select_idx = select_index_by_cost();
@@ -507,7 +521,7 @@ int64_t AccessPathMgr::select_index() {
         }
     }
 
-    return select_idx; 
+    return select_idx;
 }
 
 int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
@@ -522,7 +536,7 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         _main_path.reset();
         std::string& name = path->index_info_ptr->short_name;
         SchemaFactory::get_instance()->update_virtual_index_info(select_idx, name, sample_sql);
-        DB_WARNING("hit virtual index, table_id: %ld, virtual_index_id: %ld, virtual_index_name: %s, sample_sql: %s", 
+        DB_WARNING("hit virtual index, table_id: %ld, virtual_index_id: %ld, virtual_index_name: %s, sample_sql: %s",
             _table_id, select_idx, name.c_str(), sample_sql.c_str());
         return select_index_in_baikaldb(sample_sql);
     }
@@ -538,11 +552,12 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         std::unordered_set<ExprNode*> other_condition;
         std::unordered_set<ExprNode*> need_cut_condition;
         select_idx = multi_reverse_index[0];
+        _select_idx = select_idx;
         for (auto index_id : multi_reverse_index) {
             auto path = _main_path.path(index_id);
             serialize_index_and_set_router_index(path->pos_index, &_main_path.path(_table_id)->pos_index,
                     path->is_covering_index);
-            need_cut_condition.insert(path->need_cut_index_range_condition.begin(), 
+            need_cut_condition.insert(path->need_cut_index_range_condition.begin(),
                     path->need_cut_index_range_condition.end());
         }
         // 倒排多索引，直接上到其他过滤条件里
@@ -595,13 +610,13 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
                 ScanIndexInfo::IndexUseFor backup_use_for = ScanIndexInfo::U_GLOBAL_LEARNER;
                 if (!path->index_info_ptr->is_global) {
                     backup_use_for = ScanIndexInfo::U_LOCAL_LEARNER;
-                } 
+                }
                 serialize_index_and_set_router_index(learner_path->pos_index, &_main_path.path(_table_id)->pos_index,
                     learner_path->is_covering_index, backup_use_for);
             }
             _learner_use_diff_index = true;
-            DB_WARNING("need_select_learner_index: %d, has_disable_index: %d, index_id: %ld, learner_idx: %ld, sample_sql: %s", 
-                path->need_select_learner_index(), _learner_path.has_disable_index(), 
+            DB_WARNING("need_select_learner_index: %d, has_disable_index: %d, index_id: %ld, learner_idx: %ld, sample_sql: %s",
+                path->need_select_learner_index(), _learner_path.has_disable_index(),
                 path->index_id, learner_idx, sample_sql.c_str());
             std::vector<ExprNode*> learner_condition;
             learner_condition.insert(learner_condition.end(), learner_path->other_condition.begin(),
@@ -694,7 +709,7 @@ int AccessPathMgr::choose_arrow_pb_reverse_index() {
         DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
         auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
             _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
-                return std::find(to_remove_indexs.begin(), to_remove_indexs.end(), index) 
+                return std::find(to_remove_indexs.begin(), to_remove_indexs.end(), index)
                     != to_remove_indexs.end() ? true : false;
             }), _multi_reverse_index.end());
         };
@@ -706,7 +721,7 @@ int AccessPathMgr::choose_arrow_pb_reverse_index() {
             remove_indexs_func(arrow_indexs);
         }
     }
-    return 0;   
+    return 0;
 }
 
 int ScanNode::create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root) {
@@ -745,7 +760,7 @@ int ScanNode::create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextInd
             }
             break;
         }
-        case pb::FNT_AND : 
+        case pb::FNT_AND :
         case pb::FNT_OR : {
             auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(node->info);
             if (inner_node.children.size() == 1) {

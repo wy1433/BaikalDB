@@ -28,6 +28,7 @@
 #include "my_raft_log_storage.h"
 #include "log_entry_reader.h"
 #include "rocksdb/cache.h"
+#include "rocksdb/db.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
 #include "concurrency.h"
 #include "mut_table_key.h"
@@ -42,6 +43,7 @@ DECLARE_string(stable_uri);
 DECLARE_string(snapshot_uri);
 DEFINE_int64(reverse_merge_interval_us, 2 * 1000 * 1000,  "reverse_merge_interval(2 s)");
 DEFINE_int64(ttl_remove_interval_s, 24 * 3600,  "ttl_remove_interval_s(24h)");
+DEFINE_string(ttl_remove_interval_period, "",  "ttl_remove_interval_period hour(0-23)");
 DEFINE_int64(delay_remove_region_interval_s, 600,  "delay_remove_region_interval");
 //DEFINE_int32(update_status_interval_us, 2 * 1000 * 1000,  "update_status_interval(2 s)");
 DEFINE_int32(store_port, 8110, "Server port");
@@ -79,6 +81,7 @@ DEFINE_string(network_segment, "", "network segment of store set by user");
 DEFINE_string(container_id, "", "container_id for zoombie instance");
 DEFINE_int32(rocksdb_perf_level, rocksdb::kDisable, "rocksdb_perf_level");
 DEFINE_bool(stop_ttl_data, false, "stop ttl data");
+DEFINE_int64(check_peer_delay_min, 1, "check peer delay min");
 DECLARE_bool(store_rocks_hang_check);
 DECLARE_int32(store_rocks_hang_check_timeout_s);
 DECLARE_int32(store_rocks_hang_cnt_limit);
@@ -278,6 +281,7 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
     _txn_clear_bth.run([this]() {txn_clear_thread();});
     _binlog_timeout_check_bth.run([this]() {binlog_timeout_check_thread();});
     _binlog_fake_bth.run([this]() {binlog_fake_thread();});
+    _region_peer_delay_bth.run([this]() {check_region_peer_delay();});
     _has_prepared_tran = true;
     prepared_txns.clear();
     doing_snapshot_regions.clear();
@@ -447,6 +451,15 @@ void Store::region_raft_control(google::protobuf::RpcController* controller,
         DB_FATAL("region id:%lu not exist in store, logid:%lu",
                     request->region_id(), log_id);
         return;
+    }
+    if (request->op_type() == pb::SetPeer && request->force() && region->removed()) {
+        // 需要等table info才能init成功
+        region->wait_table_info(); // 死循环 !
+        // 恢复相当于重启region
+        region->set_restart(true);
+        region->init(false, 0);
+        region->set_removed(false);
+        DB_WARNING("restore region_id: %ld success ", region->get_region_id());
     }
     region->raft_control(controller,
                          request,
@@ -698,6 +711,10 @@ void Store::get_applied_index(google::protobuf::RpcController* controller,
         response->set_errmsg("region not exist");
         return;
     }
+    if (request->use_read_idx()) {
+        region->get_read_index(response);
+        return;
+    }
     response->set_region_status(region->region_status());
     response->set_applied_index(region->get_log_index());
     response->mutable_region_raft_stat()->set_applied_index(region->get_log_index());
@@ -842,6 +859,48 @@ void Store::query_region(google::protobuf::RpcController* controller,
         });
         return;
     }
+    if (request->query_apply_index()) {
+        auto extra_res = response->mutable_extra_res();
+        if (request->region_ids_size() <= 0) {
+            traverse_region_map([extra_res](const SmartRegion& region) {
+                if (region->is_learner()) {
+                    auto info = extra_res->add_infos();
+                    info->set_table_id(region->get_table_id());
+                    info->set_region_id(region->get_region_id());
+                    info->set_resource_tag(FLAGS_resource_tag);
+                    info->set_version(region->get_version());
+                    info->set_apply_index(region->get_log_index());
+                    info->set_status("LEARNER");
+                }
+            });
+        } else {
+            for (auto region_id : request->region_ids()) {
+                auto info = extra_res->add_infos();
+                info->set_region_id(region_id);
+                info->set_resource_tag(FLAGS_resource_tag);
+                SmartRegion region = get_region(region_id);
+                if (region == nullptr) {
+                    info->set_table_id(-1);
+                    info->set_version(-1);
+                    info->set_apply_index(-1);
+                    info->set_status("NOTFOUND");
+                    DB_FATAL("region_id: %ld not exist, may be removed", region_id);
+                } else {
+                    info->set_table_id(region->get_table_id());
+                    info->set_version(region->get_version());
+                    info->set_apply_index(region->get_log_index());
+                    if (region->is_leader()) {
+                        info->set_status("LEADER");
+                    } else if (region->is_learner()) {
+                        info->set_status("LEARNER");
+                    } else {
+                        info->set_status("FOLLOWER");
+                    }
+                }
+            }
+        }
+        return;
+    }
     if (request->region_ids_size() == 0) {
         traverse_region_map([&id_leader_map](const SmartRegion& region) {
             id_leader_map[region->get_region_id()] = 
@@ -913,6 +972,9 @@ void Store::heart_beat_thread() {
     //static int64_t count = 0;
     while (!_shutdown) {
         send_heart_beat();
+        traverse_copy_region_map([](const SmartRegion& region) {
+            region->cancel_all_blacklist_sign();
+        });
         bthread_usleep_fast_shutdown(FLAGS_store_heart_beat_interval_us, _shutdown);
     }
 }
@@ -977,6 +1039,22 @@ void Store::ttl_remove_thread() {
         traverse_copy_region_map([](const SmartRegion& region) {
             region->update_ttl_info();
         });
+        // 控制ttl在ttl_remove_interval_period指定时间范围,典型是晚上流量低峰
+        std::vector<std::string> periods = string_split(FLAGS_ttl_remove_interval_period, '-');
+        if (periods.size() == 2) {
+            try {
+                int start_hour = std::stoi(periods[0]);
+                int end_hour = std::stoi(periods[1]);
+                if (start_hour >= 0 && start_hour <= 23 && end_hour >= 0 && end_hour <= 23) {
+                    TimePeriodChecker tc(start_hour, end_hour);
+                    if (!tc.now_in_interval_period()) {
+                        continue;
+                    }
+                }
+            } catch (...) {
+                DB_WARNING("FLAGS_ttl_remove_interval_period %s", FLAGS_ttl_remove_interval_period.c_str());
+            }
+        }
 
         if (time.get_time() > FLAGS_ttl_remove_interval_s * 1000 * 1000LL) {
             traverse_copy_region_map([](const SmartRegion& region) {
@@ -1118,12 +1196,8 @@ void Store::txn_clear_thread() {
 void Store::binlog_timeout_check_thread() {
     while (!_shutdown) {
         traverse_copy_region_map([this](const SmartRegion& region) {
-            if (region->is_binlog_region()) {
-                int64_t ts = get_tso();
-                if (ts < 0) {
-                    return;
-                }
-                region->binlog_timeout_check(ts);
+            if (region->is_binlog_region() && !region->is_shutdown()) {
+                region->binlog_timeout_check();
             }
         });
         bthread_usleep_fast_shutdown(FLAGS_binlog_timeout_check_ms * 1000, _shutdown);
@@ -1236,6 +1310,7 @@ void Store::process_merge_request(int64_t table_id, int64_t region_id) {
     region_merge->set_src_start_key(ptr_region->get_start_key());
     region_merge->set_src_end_key(ptr_region->get_end_key());
     region_merge->set_table_id(table_id);
+    region_merge->set_partition_id(ptr_region->get_partition_id());
 
     //发送请求，收到响应
     if (_meta_server_interact.send_request("meta_manager", request, response) == 0) {
@@ -1275,6 +1350,8 @@ void Store::process_split_request(int64_t table_id, int64_t region_id, bool tail
     region_split->set_table_id(table_id);
     if (tail_split) {
         region_split->set_tail_split(true);
+        int region_num = _factory->get_tail_split_nums(table_id);
+        region_split->set_new_region_num(region_num);
     }
     //发送请求，收到响应
     if (_meta_server_interact.send_request("meta_manager", request, response) == 0) {
@@ -1354,6 +1431,24 @@ void Store::monitor_memory() {
     
 }
 
+void Store::check_region_peer_delay() {
+    while (!_shutdown) {
+        TimeCost t;
+        std::vector<int64_t> region_ids;
+        traverse_region_map([&region_ids](const SmartRegion& region) {
+            region_ids.emplace_back(region->get_region_id());
+        });
+        for (size_t i = 0; i < region_ids.size(); ++i) {
+            SmartRegion ptr_region = get_region(region_ids[i]);
+            if (ptr_region != nullptr) {
+                ptr_region->check_peer_latency();
+            }
+        }
+        DB_WARNING("finish check_region_peer_delay, cost: %ld", t.get_time());
+        bthread_usleep_fast_shutdown(FLAGS_check_peer_delay_min * 60 * 1000 * 1000ULL, _shutdown);
+    }
+}
+
 void Store::whether_split_thread() {
     static int64_t count = 0;
     (void)count;
@@ -1398,7 +1493,7 @@ void Store::whether_split_thread() {
             int64_t region_capacity = 10000000;
             int ret = _factory->get_region_capacity(ptr_region->get_global_index_id(), region_capacity);
             if (ret != 0) {
-                DB_WARNING("table info not exist, region_id: %ld", region_ids[i]);
+                DB_DEBUG("table info not exist, region_id: %ld", region_ids[i]);
                 continue;
             }
             region_capacity = std::max(FLAGS_min_split_lines, region_capacity);
@@ -1475,6 +1570,12 @@ void Store::whether_split_thread() {
                    && ptr_region->get_lastcycle_timecost() > FLAGS_none_region_merge_interval_us) {
                     DB_WARNING("region:%ld is none, log_index:%ld, process merge", 
                               region_ids[i], ptr_region->get_log_index());
+                    int64_t seek_table_lines = 0;
+                    ptr_region->has_sst_data(&seek_table_lines);
+                    if (seek_table_lines > 0) {
+                        ptr_region->set_num_table_lines(seek_table_lines);
+                        continue;
+                    }
                     process_merge_request(ptr_region->get_global_index_id(), region_ids[i]);
                     continue;
                 }
@@ -1587,7 +1688,13 @@ int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids, uint
         return -1;
     }
     if (!ranges.empty() && approx_sizes.size() == ranges.size()) {
-        _rocksdb->get_db()->GetApproximateSizes(data_cf, &ranges[0], ranges.size(), &approx_sizes[0], uint8_t(3));
+#if ROCKSDB_MAJOR == 7
+        _rocksdb->get_db()->GetApproximateSizes(data_cf, &ranges[0], ranges.size(), &approx_sizes[0], 
+                rocksdb::DB::SizeApproximationFlags::INCLUDE_MEMTABLES | rocksdb::DB::SizeApproximationFlags::INCLUDE_FILES);
+#else
+        _rocksdb->get_db()->GetApproximateSizes(data_cf, &ranges[0], ranges.size(), &approx_sizes[0], 
+                uint8_t(3));
+#endif
         size_t idx = 0;
         for (size_t i = 0; i < region_ids.size(); ++i) {
             if (region_sizes[i] == UINT64_MAX && idx < approx_sizes.size()) {
@@ -1797,15 +1904,39 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         }
     }
     const auto& delete_region_ids = response.delete_region_ids();
-    auto remove_func = [this, delete_region_ids]() {
+    std::vector<RemoveQueueItem> remove_queue_items;
+    remove_queue_items.reserve(delete_region_ids.size());
+    for (auto& delete_region_id : delete_region_ids) {
+        if (_shutdown) {
+            return;
+        }
+        SmartRegion region = get_region(delete_region_id);
+        if (region == nullptr) {
+            continue;
+        }
+        remove_queue_items.emplace_back(RemoveQueueItem(region->region_uuid(), region->get_region_id()));
+        DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld uuid:%lu",
+                delete_region_id, region->region_uuid());
+    }
+
+    auto remove_func = [this, remove_queue_items]() {
         //删除region数据，该region已不在raft组内
-        for (auto& delete_region_id : delete_region_ids) {
+        for (auto& remove_item : remove_queue_items) {
             if (_shutdown) {
                 return;
             }
-            DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld",
-                    delete_region_id);
-            drop_region_from_store(delete_region_id, true);
+            SmartRegion region = get_region(remove_item.drop_region_id());
+            if (region == nullptr) {
+                continue;
+            }
+            if (region->region_uuid() != remove_item.region_uuid()) {
+                DB_WARNING("delete queue region not match delete_region_id:%ld",
+                    remove_item.drop_region_id());
+                continue;
+            }
+            DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld %lu",
+                    remove_item.drop_region_id(), region->region_uuid());
+            drop_region_from_store(remove_item.drop_region_id(), true);
         }
     };
     _remove_region_queue.run(remove_func);

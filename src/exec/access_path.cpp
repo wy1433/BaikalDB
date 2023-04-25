@@ -14,7 +14,7 @@
 
 #include "access_path.h"
 #include "slot_ref.h"
-#ifdef BAIDU_INTERNAL 
+#ifdef BAIDU_INTERNAL
 #include <base/containers/flat_map.h>
 #else
 #include <butil/containers/flat_map.h>
@@ -63,7 +63,7 @@ bool AccessPath::need_select_learner_index() {
 }
 
 void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
-        std::vector<ExprValue>& values, SmartRecord record, size_t field_idx) {
+        std::vector<ExprValue>& values, MutTableKey& key, size_t field_idx) {
     if (expr == nullptr) {
         return;
     }
@@ -71,10 +71,10 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
         return;
     }
     size_t row_idx = 0;
-    for (; row_idx < range_fields.size() && 
+    for (; row_idx < range_fields.size() &&
             field_idx < index_info_ptr->fields.size(); row_idx++, field_idx++) {
         if (index_info_ptr->fields[field_idx].id == range_fields[row_idx]) {
-            record->set_value(record->get_field_by_tag(range_fields[row_idx]), values[row_idx]);
+            key.append_value(values[row_idx].cast_to(index_info_ptr->fields[field_idx].type));
             hit_index_field_ids.insert(range_fields[row_idx]);
         } else {
             break;
@@ -118,8 +118,8 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
 }
 
 struct RecordRange {
-    SmartRecord left_record;
-    SmartRecord right_record;
+    MutTableKey left_key;
+    MutTableKey right_key;
 };
 // 现在只支持CNF，DNF怎么做?
 // 普通索引按照range匹配，匹配到EQ可以往下走，匹配到RANGE、LIKE_PREFIX停止
@@ -191,6 +191,11 @@ void AccessPath::calc_normal(Property& sort_property) {
             case LIKE_EQ:
                 ++eq_count;
             case LIKE_PREFIX:
+                // 数字 like不能命中索引
+                if (range.type == LIKE_PREFIX && field.type != pb::STRING) {
+                    field_break = true;
+                    break;
+                }
                 ++field_cnt;
                 hit_index_field_ids.insert(field.id);
                 _left_field_cnt = field_cnt;
@@ -224,11 +229,11 @@ void AccessPath::calc_normal(Property& sort_property) {
         }
     }
     if (hit_index_field_ids.size() < field_range_map.size()) {
-	//除cut contition外有过滤条件
-	_need_filter = true;
+        //除cut contition外有过滤条件
+        _need_filter = true;
     }
     is_sort_index = check_sort_use_index(sort_property);
-    DB_DEBUG("is_sort_index:%d, eq_count:%d, sort_property:%lu", 
+    DB_DEBUG("is_sort_index:%d, eq_count:%d, sort_property:%lu",
         is_sort_index, eq_count, sort_property.slot_order_exprs.size());
     pos_index.set_index_id(index_id);
     if (is_sort_index) {
@@ -245,10 +250,17 @@ void AccessPath::calc_normal(Property& sort_property) {
 
 // 填充索引的range
 void AccessPath::calc_index_range() {
+    if (index_type == pb::I_FULLTEXT) {
+        return;
+    }
     ExprNode* in_row_expr = nullptr;
-    SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
-    SmartRecord left_record = record_template->clone(false);
-    SmartRecord right_record = record_template->clone(false);
+    MutTableKey left_key;
+    MutTableKey right_key;
+    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ) {
+        uint8_t null_flag = 0;
+        left_key.append_u8(null_flag);
+        right_key.append_u8(null_flag);
+    }
     std::vector<RecordRange> in_records;
     // offset: in条件组合展开后的步长,用于非首字段的对应
     // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
@@ -267,51 +279,64 @@ void AccessPath::calc_index_range() {
         switch (range.type) {
             case RANGE: {
                 auto range_func = [&range, this, field_cnt, field](
-                        SmartRecord& left_record, SmartRecord& right_record) {
+                        MutTableKey& left_key, MutTableKey& right_key) {
                     size_t field_idx = field_cnt - 1;
                     if (range.left.size() == 1) {
-                        left_record->set_value(left_record->get_field_by_tag(field.id), range.left[0]);
+                        // join on 条件两表字段类型可能不同，导致slotref的类型不准，需要处理
+                        left_key.append_value(range.left[0].cast_to(field.type));
                         need_cut_index_range_condition.insert(range.left_expr);
                     } else if (range.left.size() > 1) {
-                        calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
-                            range.left_open, range.left, left_record, field_idx);
+                        calc_row_expr_range(range.left_row_field_ids, range.left_expr,
+                            range.left_open, range.left, left_key, field_idx);
                     }
                     if (range.right.size() == 1) {
-                        right_record->set_value(right_record->get_field_by_tag(field.id), range.right[0]);
+                        right_key.append_value(range.right[0].cast_to(field.type));
                         need_cut_index_range_condition.insert(range.right_expr);
                     } else if (range.right.size() > 1) {
-                        calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
-                            range.right_open, range.right, right_record, field_idx);
+                        calc_row_expr_range(range.right_row_field_ids, range.right_expr,
+                            range.right_open, range.right, right_key, field_idx);
                     }
                 };
                 if (in_records.size() > 0) {
                     for (auto& rg : in_records) {
-                        rg.right_record = rg.left_record->clone(true);
-                        range_func(rg.left_record, rg.right_record);
+                        rg.right_key = rg.left_key;
+                        range_func(rg.left_key, rg.right_key);
                     }
                 } else {
-                    range_func(left_record, right_record);
+                    range_func(left_key, right_key);
                 }
                 break;
             }
             case EQ:
             case LIKE_EQ:
             case LIKE_PREFIX:
-                if (in_records.empty()) {
-                    left_record->set_value(left_record->get_field_by_tag(field.id), range.eq_in_values[0]);
-                    right_record->set_value(right_record->get_field_by_tag(field.id), range.eq_in_values[0]);
-                } else {
-                    for (auto& rg : in_records) {
-                        rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), range.eq_in_values[0]);
-                    }
-                }
                 if (range.type == LIKE_PREFIX) {
+                    // do nothing
                 } else if (range.is_row_expr) {
                     if (all_in_index(range.left_row_field_ids, hit_index_field_ids)) {
                         need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                     }
                 } else {
                     need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+                }
+                if (_like_prefix) {
+                    if (in_records.empty()) {
+                        left_key.append_string_prefix(range.eq_in_values[0].get_string());
+                        right_key.append_string_prefix(range.eq_in_values[0].get_string());
+                    } else {
+                        for (auto& rg : in_records) {
+                            rg.left_key.append_string_prefix(range.eq_in_values[0].get_string());
+                        }
+                    }
+                } else {
+                    if (in_records.empty()) {
+                        left_key.append_value(range.eq_in_values[0].cast_to(field.type));
+                        right_key.append_value(range.eq_in_values[0].cast_to(field.type));
+                    } else {
+                        for (auto& rg : in_records) {
+                            rg.left_key.append_value(range.eq_in_values[0].cast_to(field.type));
+                        }
+                    }
                 }
                 break;
             case IN:
@@ -324,8 +349,7 @@ void AccessPath::calc_index_range() {
                         size_t vi = 0;
                         size_t i = 0;
                         for (auto& rg : in_records) {
-                            rg.left_record->set_value(
-                                    rg.left_record->get_field_by_tag(field.id), range.eq_in_values[vi]);
+                            rg.left_key.append_value(range.eq_in_values[vi].cast_to(field.type));
                             if ((++i) == offset) {
                                 i = 0;
                                 vi = ((vi + 1) % vs);
@@ -341,7 +365,7 @@ void AccessPath::calc_index_range() {
                     // 第一次in_records size为0,不受限制
                     if (in_records.empty()) {
                         RecordRange rg;
-                        rg.left_record = left_record->clone(true);
+                        rg.left_key = left_key;
                         in_records.emplace_back(rg);
                     }
                     if (range.is_row_expr) {
@@ -356,8 +380,8 @@ void AccessPath::calc_index_range() {
                         // 为保持前面已处理字段步长稳定性, 当前字段需要写在外层循环与in_records进行展开.
                         for (auto record : in_records) {
                             RecordRange rg;
-                            rg.left_record = record.left_record->clone(true);
-                            rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), value);
+                            rg.left_key = record.left_key;
+                            rg.left_key.append_value(value.cast_to(field.type));
                             comb_in_records.emplace_back(rg);
                         }
                     }
@@ -380,38 +404,39 @@ void AccessPath::calc_index_range() {
                 break;
         }
     }
+    pos_index.set_is_eq(_is_eq_or_in);
     if (_left_field_cnt == 0 && _right_field_cnt == 0) {
+        pos_index.clear_is_eq();//无命中条件非eq
         pos_index.add_ranges();
     } else if (in_records.size() > 0) {
         is_possible = true;
         butil::FlatSet<std::string> filter;
         filter.init(12301);
         for (auto& rg : in_records) {
-            std::string str;
-            rg.left_record->encode(str);
-            if (filter.seek(str) != nullptr) {
+            if (filter.seek(rg.left_key.data()) != nullptr) {
                 continue;
             }
-            filter.insert(str);
+            filter.insert(rg.left_key.data());
             auto range = pos_index.add_ranges();
-            MutTableKey  left;
-            MutTableKey  right;
-            if (rg.left_record->encode_key(*index_info_ptr.get(), left, _left_field_cnt, false, _like_prefix) != 0) {
-                DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
-                continue;
+            if (_left_field_cnt == index_info_ptr->fields.size()
+                && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
+                && !_like_prefix) {
+                rg.left_key.set_full(true);
             }
-            range->set_left_key(left.data());
-            range->set_left_full(left.get_full());
-            if (rg.right_record != nullptr) {
-                if (rg.right_record->encode_key(*index_info_ptr.get(), right, _right_field_cnt, false, _like_prefix) != 0) {
-                    DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
-                    continue;
+            range->set_left_key(rg.left_key.data());
+            range->set_left_full(rg.left_key.get_full());
+            if (!_is_eq_or_in) {
+                if (_right_field_cnt == index_info_ptr->fields.size()
+                    && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
+                    && !_like_prefix) {
+                    rg.right_key.set_full(true);
                 }
-                range->set_right_key(right.data());
-                range->set_right_full(right.get_full());
+                range->set_right_key(rg.right_key.data());
+                range->set_right_full(rg.right_key.get_full());
             } else {
-                range->set_right_key(left.data());
-                range->set_right_full(left.get_full());
+                // eq通过标记判断，后续可以删掉
+                range->set_right_key(rg.left_key.data());
+                range->set_right_full(rg.left_key.get_full());
             }
             range->set_left_field_cnt(_left_field_cnt);
             range->set_right_field_cnt(_right_field_cnt);
@@ -422,20 +447,20 @@ void AccessPath::calc_index_range() {
     } else {
         is_possible = true;
         auto range = pos_index.add_ranges();
-        MutTableKey  left;
-        MutTableKey  right;
-        if (left_record->encode_key(*index_info_ptr.get(), left, _left_field_cnt, false, _like_prefix) != 0) {
-            DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
-            return;
+        if (_left_field_cnt == index_info_ptr->fields.size()
+            && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
+            && !_like_prefix) {
+            left_key.set_full(true);
         }
-        if (right_record->encode_key(*index_info_ptr.get(), right, _right_field_cnt, false, _like_prefix) != 0) {
-            DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
-            return;
+        if (_right_field_cnt == index_info_ptr->fields.size()
+            && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
+            && !_like_prefix) {
+            right_key.set_full(true);
         }
-        range->set_left_key(left.data());
-        range->set_left_full(left.get_full());
-        range->set_right_key(right.data());
-        range->set_right_full(right.get_full());
+        range->set_left_key(left_key.data());
+        range->set_left_full(left_key.get_full());
+        range->set_right_key(right_key.data());
+        range->set_right_full(right_key.get_full());
         range->set_left_field_cnt(_left_field_cnt);
         range->set_right_field_cnt(_right_field_cnt);
         range->set_left_open(_left_open);
@@ -482,6 +507,7 @@ void AccessPath::calc_fulltext() {
             break;
     }
     if (hit_index && values != nullptr) {
+        hit_index_field_ids.emplace(field_id);
         SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
         is_possible = true;
         pos_index.set_index_id(index_id);
@@ -512,7 +538,13 @@ void AccessPath::calc_fulltext() {
         pos_index.set_index_id(index_id);
         pos_index.add_ranges();
     }
+    if (hit_index_field_ids.size() < field_range_map.size()) {
+        //除cut contition外有过滤条件
+        _need_filter = true;
+    }
+    index_other_condition_count = field_range_map.size() - hit_index_field_ids.size();
 }
+
 double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
     switch (range.type) {
         case RANGE: {
@@ -520,7 +552,7 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
             ExprValue right;
             if (range.left_expr != nullptr) {
                 left = range.left[0];
-            } 
+            }
             if (range.right_expr != nullptr) {
                 right = range.right[0];
             }
@@ -536,7 +568,7 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
             return SchemaFactory::get_instance()->get_histogram_ratio(table_id, field_id, left, right);
         }
         case EQ:
-        case LIKE_EQ: 
+        case LIKE_EQ:
         case IN: {
             double in_selectivity = 0.0;
             for (auto& value : range.eq_in_values) {
@@ -626,7 +658,7 @@ void AccessPath::calc_cost(std::map<std::string, std::string>* cost_info, std::m
         table_get_rows = index_read_rows * index_other_condition_selectivity;
     }
     cost = index_read_rows * INDEX_SEEK_FACTOR + table_get_rows * TABLE_GET_FACTOR;
-    DB_DEBUG("table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f", 
+    DB_DEBUG("table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f",
             table_rows,index_read_rows,selectivity,index_other_condition_selectivity,other_condition_selectivity,cost);
     if (cost_info != nullptr) {
         (*cost_info)["cost"] = std::to_string(cost);

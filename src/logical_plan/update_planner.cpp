@@ -33,13 +33,13 @@ int UpdatePlanner::plan() {
             DB_WARNING("parse db table fail");
             return -1;
         }
-    } 
+    }
     if (_update->table_refs->node_type == parser::NT_TABLE_SOURCE) {
         if (0 != parse_db_tables(_update->table_refs, &_join_root)) {
             DB_WARNING("parse db table fail");
             return -1;
         }
-    } 
+    }
     if (0 != parse_kv_list()) {
         return -1;
     }
@@ -71,9 +71,7 @@ int UpdatePlanner::plan() {
     ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
     _ctx->prepared_table_id = table_id;
-    if (!_ctx->is_prepared) {
-        set_dml_txn_state(table_id);
-    }
+    set_dml_txn_state(table_id);
     // 局部索引binlog处理标记
     if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
         update_node->set_local_index_binlog(true);
@@ -93,6 +91,9 @@ int UpdatePlanner::parse_limit() {
 int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
     if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(try_to_lower(_current_tables[0])) == 0) {
         DB_WARNING("no database name, specify database by USE cmd");
+    }
+    if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(try_to_lower(_current_tables[0])) == 0) {
+        DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
     }
     ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
@@ -106,7 +107,7 @@ int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
     update_node->set_node_type(pb::UPDATE_NODE);
     update_node->set_limit(_limit_count);
     update_node->set_is_explain(_ctx->is_explain);
-    update_node->set_num_children(1); //TODO 
+    update_node->set_num_children(1); //TODO
     pb::DerivePlanNode* derive = update_node->mutable_derive_node();
     pb::UpdateNode* update = derive->mutable_update_node();
     update->set_table_id(table_id);
@@ -131,13 +132,22 @@ int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
 int UpdatePlanner::parse_kv_list() {
     ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
-    auto table_info_ptr = _factory->get_table_info_ptr(table_id); 
+    auto table_info_ptr = _factory->get_table_info_ptr(table_id);
     if (table_info_ptr == nullptr) {
         DB_WARNING("table:%ld is nullptr", table_id);
         return -1;
     }
     TableInfo& table_info = *table_info_ptr;
     parser::Vector<parser::Assignment*> set_list = _update->set_list;
+    std::set<int32_t> pk_field_ids;
+    auto pk = _factory->get_index_info_ptr(table_id);
+    if (pk == nullptr) {
+        DB_WARNING("no pk found with id: %ld", table_id);
+        return -1;
+    }
+    for (auto& field : pk->fields) {
+        pk_field_ids.emplace(field.id);
+    }
     std::set<int32_t> update_field_ids;
     for (int idx = 0; idx < set_list.size(); ++idx) {
         if (set_list[idx] == nullptr) {
@@ -160,13 +170,21 @@ int UpdatePlanner::parse_kv_list() {
         auto slot = get_scan_ref_slot(alias_name, field_info->table_id, field_info->id, field_info->type);
         _update_slots.push_back(slot);
         update_field_ids.insert(field_info->id);
+        // 更新分区键,走全局索引流程
+        if (table_info.partition_ptr != nullptr && table_info.partition_ptr->partition_field_id() == field_info->id) {
+            _ctx->execute_global_flow = true;
+        }
+        // 更新主键，走全局索引流程
+        if (pk_field_ids.count(field_info->id) > 0) {
+            _ctx->execute_global_flow = true;
+        }
 
         pb::Expr value_expr;
         if (0 != create_expr_tree(set_list[idx]->expr, value_expr, CreateExprOptions())) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
-        if (field_info->on_update_value == "(current_timestamp())" 
+        if (field_info->on_update_value == "(current_timestamp())"
                 || field_info->default_value == "(current_timestamp())") {
             if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL) {
                 auto node = value_expr.mutable_nodes(0);

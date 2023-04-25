@@ -116,6 +116,7 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
         response->set_errmsg("table not exist");
         return;
     }
+    *(response->add_schema_infos()) = schema_pb;
     for (auto& field_info : schema_pb.fields()) {
         pb::QuerySchema field_schema;
         field_schema.set_field_or_index("Field");
@@ -138,6 +139,8 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
             field_schema.set_deleted(field_info.deleted());
             field_schema.set_extra("Deleted");
         }
+        field_schema.set_default_value(field_info.default_value());
+        field_schema.set_comment(field_info.comment());
         auto record_ptr = response->add_flatten_schema_infos();
         *record_ptr = field_schema;
     }
@@ -168,6 +171,8 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
         extra[extra.size() - 2] = ']';
         index_schema.set_extra(extra);
         index_schema.set_deleted(false);
+        index_schema.set_default_value("");
+        index_schema.set_comment("");
         auto record_ptr = response->add_flatten_schema_infos();
         *record_ptr = index_schema;
     }
@@ -187,6 +192,7 @@ void QueryTableManager::construct_query_table(const TableMem& table_info,
     flatten_table_info->set_max_field_id(table_info.schema_pb.max_field_id());
     flatten_table_info->set_version(table_info.schema_pb.version());
     flatten_table_info->set_status(table_info.schema_pb.status());
+    flatten_table_info->set_partition_num(table_info.schema_pb.partition_num());
     flatten_table_info->set_table_id(table_id);
     flatten_table_info->set_byte_size_per_record(
                 table_info.schema_pb.byte_size_per_record());
@@ -428,6 +434,31 @@ void QueryTableManager::get_virtual_index_influence_info(const pb::QueryRequest*
             pb::VirtualInfoAndSqls* virtual_index_influence_info = response->add_virtual_index_influence_info();
             *virtual_index_influence_info = virtual_index_info_sqls;
         }
+    }
+}
+
+void QueryTableManager::get_table_in_fast_importer(const pb::QueryRequest* request, pb::QueryResponse* response){
+    TableManager* manager = TableManager::get_instance();
+    std::unordered_map<int64_t, int64_t> tables_ts;
+    manager->get_table_fast_importer_ts(tables_ts);
+    for (auto& tb : tables_ts) {
+        pb::SchemaInfo info;
+        manager->get_table_info(tb.first, info);
+        pb::QueryTable* table_info = response->add_flatten_tables();
+        table_info->set_table_id(tb.first);
+        table_info->set_namespace_name(info.namespace_name());
+        table_info->set_database(info.database());
+        table_info->set_table_name(info.table_name());
+        table_info->set_upper_table_name(info.upper_table_name());
+        table_info->set_region_size(info.region_size());
+        table_info->set_replica_num(info.replica_num());
+        table_info->set_resource_tag(info.resource_tag());
+        table_info->set_max_field_id(info.max_field_id());
+        table_info->set_version(info.version());
+        table_info->set_status(info.status());
+        table_info->set_deleted(info.deleted());
+        table_info->set_byte_size_per_record(info.byte_size_per_record());
+        table_info->set_fast_importer_ts(tb.second);
     }
 }
 }//namespace 

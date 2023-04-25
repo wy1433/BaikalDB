@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <ctype.h>
 #include "show_helper.h"
 #include "network_server.h"
 #include "store_interact.hpp"
@@ -100,6 +101,9 @@ void ShowHelper::init() {
     _calls[SQL_SHOW_NAMESPACES] = std::bind(&ShowHelper::_show_namespaces,
              this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_GRANTS] = std::bind(&ShowHelper::_show_grants,
+    _calls[SQL_SHOW_PARTITION_TABLE] = std::bind(&ShowHelper::_show_partition_table,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_ABNORMAL_SWITCH] = std::bind(&ShowHelper::_show_abnormal_switch,
             this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
@@ -628,7 +632,16 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     if (info.dists.size() > 0) {
         oss << ", \"dists\": [";
         for (size_t i = 0; i < info.dists.size(); ++i) {
-            oss << " {\"logical_room\":\"" << info.dists[i].logical_room << "\", ";
+            oss << " { ";
+            if (!info.dists[i].resource_tag.empty()) {
+                oss << "\"resource_tag\":\"" << info.dists[i].resource_tag << "\",";
+            }
+            if (!info.dists[i].logical_room.empty()) {
+                oss << "\"logical_room\":\"" << info.dists[i].logical_room << "\", ";
+            }
+            if (!info.dists[i].physical_room.empty()) {
+                oss << "\"physical_room\":\"" << info.dists[i].physical_room << "\", ";
+            }
             oss << "\"count\":" << info.dists[i].count << "}";
             if (i != info.dists.size() -1) {
                 oss << ",";
@@ -645,18 +658,10 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     }
     oss << ", \"namespace\":\"" << info.namespace_ << "\"}'";
     if (info.partition_num > 1) {
-        static std::map<pb::PartitionType, std::string> p_map = {
-                {pb::PT_HASH, "hash"},
-                {pb::PT_RANGE, "range"},
-        };
-        if (info.partition_info.type() == pb::PT_HASH) {
-            oss << "\nPARTITION BY HASH (" << info.partition_info.field_info().field_name();
-            oss << ") \nPARTITIONS " << info.partition_num;
-        } else if (info.partition_info.type() == pb::PT_RANGE) {
-            oss << "\nPARTITION BY RANGE (" << info.partition_info.field_info().field_name() << ")\n";
-            if (info.partition_ptr != nullptr && !info.partition_ptr->to_str().empty()) {
-                oss << "(" << info.partition_ptr->to_str() << "\n)";
-            }
+        if (info.partition_ptr != nullptr) {
+            oss << info.partition_ptr->to_str();
+        } else {
+            DB_WARNING_CLIENT(client, "partition info is null");
         }
     }
     row.emplace_back(oss.str());
@@ -1521,7 +1526,9 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
                                                     "select_index_by_cost",
                                                     "pk_prefix_balance",
                                                     "backup_table",
-                                                    "in_fast_import"};
+                                                    "in_fast_import",
+                                                    "tail_split_num",
+                                                    "tail_split_step"};
     // 前三个conf按照bool解析, pk_prefix_balance按照int32来解析
     if (split_vec.size() != 3 || allowed_conf.find(split_vec[2]) == allowed_conf.end()) {
         client->state = STATE_ERROR;
@@ -1546,7 +1553,10 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
     }
 
     std::vector<std::string> names = { "namespace", "database_name", "table_name" };
-    if (split_vec[2] == "pk_prefix_balance" || split_vec[2] == "backup_table") {
+    if (split_vec[2] == "pk_prefix_balance"
+            || split_vec[2] == "backup_table"
+            || split_vec[2] == "tail_split_num"
+            || split_vec[2] == "tail_split_step") {
         names.emplace_back("value");
     }
 
@@ -1569,9 +1579,9 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
     return true;
 }
 
-bool ShowHelper::_process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+bool ShowHelper::_process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t,
         std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info) {
-    std::vector<std::string> field_names = {"table_id", "region_id", "instance_ip", "table_name", "check_point_datetime", "max_oldest_datetime", 
+    std::vector<std::string> field_names = {"table_id", "current_partition_id", "region_id", "instance_ip", "table_name", "check_point_datetime", "max_oldest_datetime",
                                     "region_oldest_datetime", "binlog_cf_oldest_datetime", "data_cf_oldest_datetime"};
     std::vector<ResultField> result_fields;
     result_fields.reserve(3);
@@ -1603,6 +1613,7 @@ bool ShowHelper::_process_binlogs_info(const SmartSocket& client, std::unordered
                 std::vector<std::string> row;
                 row.reserve(10);
                 row.emplace_back(std::to_string(table_id));
+                row.emplace_back(std::to_string(current_partition_id));
                 row.emplace_back(std::to_string(region_id));
                 row.emplace_back(instance_ip);
                 row.emplace_back(table_name);
@@ -1616,16 +1627,13 @@ bool ShowHelper::_process_binlogs_info(const SmartSocket& client, std::unordered
         }
     }
     //泛型排序，让展示结果有序
-    std::sort(result_rows.begin(), result_rows.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) { 
-        if (a.size() < 2 || b.size() < 2) {
-            return false;
-        }
-        const std::string str_prefix_a = a[0] + a[1];
-        const std::string str_prefix_b = b[0] + b[1];
+    std::sort(result_rows.begin(), result_rows.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+        const std::string str_prefix_a = a[0] + a[2];
+        const std::string str_prefix_b = b[0] + b[2];
         errno = 0;
         int64_t value_prefix_a = strtoll(str_prefix_a.c_str(), NULL, 10);
         int64_t value_prefix_b = strtoll(str_prefix_b.c_str(), NULL, 10);
-        return value_prefix_a <= value_prefix_b;
+        return value_prefix_a < value_prefix_b;
     });
 
     if (_make_common_resultset_packet(client, result_fields, result_rows) != 0) {
@@ -1638,7 +1646,7 @@ bool ShowHelper::_process_binlogs_info(const SmartSocket& client, std::unordered
     return true;
 }
 
-bool ShowHelper::_process_partition_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+bool ShowHelper::_process_partition_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t,
         std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info) {
     std::vector<std::string> field_names = {"table_id", "partition_index", "check_point_datetime", "oldest_datetime",  "table_name"};
     std::vector<ResultField> result_fields;
@@ -1686,7 +1694,7 @@ bool ShowHelper::_process_partition_binlogs_info(const SmartSocket& client, std:
         const std::string prefix_str = table_id_str + partition_index_str;
         if (map_final_result.count(prefix_str) > 0) {
             map_final_result[prefix_str][2] = std::max(vec_result_row[2], map_final_result[prefix_str][2]);
-            map_final_result[prefix_str][3] = std::min(vec_result_row[3], map_final_result[prefix_str][3]);
+            map_final_result[prefix_str][3] = std::max(vec_result_row[3], map_final_result[prefix_str][3]);
         } else {
             map_final_result[prefix_str] = vec_result_row;
         }
@@ -1699,7 +1707,7 @@ bool ShowHelper::_process_partition_binlogs_info(const SmartSocket& client, std:
     }
 
     //泛型排序，让展示结果有序
-    std::sort(resutl_res_final.begin(), resutl_res_final.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) { 
+    std::sort(resutl_res_final.begin(), resutl_res_final.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) {
         if (a.size() < 3 || b.size() < 3) {
             return false;
         }
@@ -1740,7 +1748,7 @@ bool ShowHelper::_show_binlogs_info(const SmartSocket& client, const std::vector
         }
         input_table_name = split_params[2];
     } else if (split_params.size() == 4) {
-        if (split_params[2] == "detailed") {
+        if (split_params[2] == "detail") {
             input_table_name = split_params[3];
             is_detailed = true;
         } else {
@@ -1763,7 +1771,7 @@ bool ShowHelper::_show_binlogs_info(const SmartSocket& client, const std::vector
     }
 }
 
-void ShowHelper::_query_regions_concurrent(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+void ShowHelper::_query_regions_concurrent(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info,
         std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos) {
     std::mutex mutex_query_info;
     for (const auto& partition_binlog_regions_info : partition_binlog_region_infos) {
@@ -1855,33 +1863,27 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
         return false;
     };
 
-    std::vector<std::string> link_table;
     if (type_func_map[split_vec[2]] != nullptr) {
-        factory->get_table_by_filter(database_table, link_table, type_func_map[split_vec[2]]);
+        factory->get_table_by_filter(database_table, type_func_map[split_vec[2]]);
     } else {
         DB_WARNING("not support type:%s", split_vec[2].c_str());
         return false;
     }
     std::vector< std::vector<std::string> > rows;
     rows.reserve(10);
-    size_t i = 0;
     for (auto& d_t_name : database_table) {
         DB_WARNING("%s", d_t_name.c_str());
         std::vector<std::string> split_vec;
         boost::split(split_vec, d_t_name,
                      boost::is_any_of("."), boost::token_compress_on);
-        if (split_vec.size() != 3) {
+        if (split_vec.size() != 6) {
             DB_FATAL("database table name:%s", d_t_name.c_str());
             continue;
         }
-        if (i < link_table.size()) {
-            split_vec.emplace_back(link_table[i]);
-        }
-        i++;
         rows.emplace_back(split_vec);
     }
 
-    std::vector<std::string> names = { "namespace", "database_name", "table_name", "binlog" };
+    std::vector<std::string> names = { "namespace", "database_name", "table_name", "binlog_db", "binlog_table", "learner_tags" };
 
     std::vector<ResultField> fields;
     fields.reserve(4);
@@ -1909,11 +1911,26 @@ bool ShowHelper::_show_region(const SmartSocket& client, const std::vector<std::
         return false;
     }
 
-    if (split_vec.size() < 4) {
+    if (split_vec.size() < 4 || split_vec[2].size() == 0) {
         client->state = STATE_ERROR;
         return false;
     }
-    int64_t table_id = strtoll(split_vec[2].c_str(), NULL, 10);
+    int64_t table_id = -1;
+    if (std::isdigit(split_vec[2][0])) {
+        table_id = strtoll(split_vec[2].c_str(), NULL, 10);
+    } else {
+        size_t found = split_vec[2].find(".");
+        std::string full_name;
+        if (found != std::string::npos) {
+            full_name = client->user_info->namespace_+ "." + split_vec[2];
+        } else {
+            full_name = client->user_info->namespace_+ "." + client->current_db + "." + split_vec[2];
+        }
+        if (factory->get_table_id(full_name, table_id) != 0) {
+            client->state = STATE_ERROR;
+            return false;
+        }
+    }
     int64_t region_id = strtoll(split_vec[3].c_str(), NULL, 10);
     DB_WARNING("table_id:%ld, region_id: %ld", table_id, region_id);
 
@@ -2285,7 +2302,7 @@ bool ShowHelper::_show_user(const SmartSocket& client, const std::vector<std::st
     // Make fields.
     std::vector<ResultField> fields;
     fields.reserve(5);
-    std::vector<std::string> names = {"Username", "Password", "Namespace Name", "Version", "Auth IPs"};
+    std::vector<std::string> names = {"Username", "Password", "Namespace Name", "Version", "Auth IPs", "resource_tag", "ddl_permission", "use_read_index"};
     for(auto name : names) {
         ResultField field;
         field.name = name;
@@ -2307,6 +2324,9 @@ bool ShowHelper::_show_user(const SmartSocket& client, const std::vector<std::st
         ips.append(ip);
     }
     row.emplace_back(ips);
+    row.emplace_back(info->resource_tag);
+    row.emplace_back(std::to_string(info->ddl_permission));
+    row.emplace_back(std::to_string(info->use_read_index));
     rows.emplace_back(row);
 
     // Make mysql packet.
@@ -2518,7 +2538,7 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
     names.reserve(10);
     fields.reserve(10);
     if (show_region) {
-        names = {"index_id", "region_id", "status", "start_key", "end_key"};
+        names = {"index_id", "region_id", "status", "start_key", "end_key", "address"};
     } else if (show_column_ddl) {
         names = {"table", "status", "done/all", "cost_time", "opt sql"};
     } else {
@@ -2591,6 +2611,11 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
                 row.emplace_back(end_key.decode_start_key_string(pri_info));
             } else {
                 row.emplace_back("+∞");
+            }
+            if (info.has_address()) {
+                row.emplace_back(info.address());
+            } else {
+                row.emplace_back("");
             }
             rows.emplace_back(row);
         }
@@ -2910,7 +2935,7 @@ bool ShowHelper::_show_global_ddl_work(const SmartSocket& client, const std::vec
     request.set_op_type(pb::QUERY_INDEX_DDL_WORK);
     request.set_table_id(table_id);
     MetaServerInteract::get_instance()->send_request("query", request, response);
-    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    //DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
 
     auto index_info = factory->get_index_info(table_id);
     for(auto& ddl : response.region_ddl_infos()) {
@@ -2949,21 +2974,74 @@ bool ShowHelper::_show_global_ddl_work(const SmartSocket& client, const std::vec
     return true;
 }
 
+bool ShowHelper::_show_partition_table(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (client == nullptr || client->query_ctx == nullptr || factory == nullptr) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    std::vector<std::string> names = {"db.table", "partition_type", "partition_field", "partition_expr"};
+    fields.reserve(10);
+    for(auto name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.emplace_back(field);
+    }
+    std::string namespace_ = client->user_info->namespace_;
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    rows.reserve(10);
+    auto tb_vec = factory->get_table_list(namespace_, nullptr);
+    for(auto& table_info : tb_vec) {
+        std::vector<std::string> row;
+        if (table_info != nullptr && table_info->partition_ptr != nullptr) {
+            row.emplace_back(table_info->name);
+            row.emplace_back(pb::PartitionType_Name(table_info->partition_info.type()));
+            row.emplace_back(table_info->partition_info.field_info().field_name());
+            if (table_info->partition_info.has_expr_string()) {
+                row.emplace_back(table_info->partition_info.expr_string());
+            } else if (table_info->partition_info.has_range_partition_field()) {
+                row.emplace_back(table_info->partition_info.range_partition_field().ShortDebugString());
+            } else if (table_info->partition_info.range_partition_values_size() > 0) {
+                row.emplace_back(table_info->partition_info.range_partition_values(0).ShortDebugString());
+            } else {
+                row.emplace_back("---");
+            }
+            rows.emplace_back(row);
+        }
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
 bool ShowHelper::_show_network_segment(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (client == nullptr || client->query_ctx == nullptr) {
         DB_FATAL("param invalid");
         //client->state = STATE_ERROR;
         return false;
     }
-   
+
     std::string resource_tag;
     if (split_vec.size() == 3) {
         resource_tag = split_vec[2];
     } else if (split_vec.size() != 2) {
         client->state = STATE_ERROR;
-        return false; 
+        return false;
     }
-    
+
     std::vector<ResultField> fields;
     fields.reserve(3);
     do {
@@ -2987,7 +3065,7 @@ bool ShowHelper::_show_network_segment(const SmartSocket& client, const std::vec
         field.length = 1024;
         fields.emplace_back(field);
     } while (0);
-    
+
     // Make rows.
     std::vector< std::vector<std::string> > rows;
     rows.reserve(10);
@@ -2997,7 +3075,7 @@ bool ShowHelper::_show_network_segment(const SmartSocket& client, const std::vec
     request.set_resource_tag(resource_tag);
     MetaServerInteract::get_instance()->send_request("query", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
-    
+
     for (auto& info : response.instance_infos()) {
         std::vector<std::string> row = {info.resource_tag(), info.network_segment(), info.address()};
         rows.emplace_back(row);
@@ -3012,14 +3090,14 @@ bool ShowHelper::_show_network_segment(const SmartSocket& client, const std::vec
     client->state = STATE_READ_QUERY_RESULT;
     return true;
 }
-    
+
 bool ShowHelper::_show_switch(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (client == nullptr || client->query_ctx == nullptr) {
         DB_FATAL("param invalid");
         //client->state = STATE_ERROR;
         return false;
     }
-    
+
     std::string resource_tag;
     if (split_vec.size() == 3) {
         resource_tag = split_vec[2];
@@ -3027,7 +3105,7 @@ bool ShowHelper::_show_switch(const SmartSocket& client, const std::vector<std::
         client->state = STATE_ERROR;
         return false;
     }
-    
+
     std::vector<ResultField> fields;
     fields.reserve(4);
     std::vector<std::string> names = {"resource tag", "peer load balance", "migrate balance", "network segment balance"};
@@ -3038,7 +3116,7 @@ bool ShowHelper::_show_switch(const SmartSocket& client, const std::vector<std::
         field.length = 1024;
         fields.emplace_back(field);
     }
-    
+
     // Make rows.
     std::vector< std::vector<std::string> > rows;
     rows.reserve(10);
@@ -3049,8 +3127,8 @@ bool ShowHelper::_show_switch(const SmartSocket& client, const std::vector<std::
     MetaServerInteract::get_instance()->send_request("query", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     for (auto& info : response.resource_tag_infos()) {
-        std::vector<std::string> row = {info.resource_tag(), 
-                                        info.peer_load_balance() ? "true" : "false", 
+        std::vector<std::string> row = {info.resource_tag(),
+                                        info.peer_load_balance() ? "true" : "false",
                                         info.migrate() ? "true" : "false",
                                         info.network_segment_balance() ? "true" : "false"};
         rows.emplace_back(row);
@@ -3324,168 +3402,21 @@ bool ShowHelper::_show_namespaces(const SmartSocket& client, const std::vector<s
     return true;
 }
 
-bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    // SHOW GRANTS [FOR user]
-    // SHOW GRANTS FOR CURRENT_USER;
-    // SHOW GRANTS FOR CURRENT_USER();
-
-    std::map<parser::MysqlACL, std::string> privs = {
-            {parser::SELECT_ACL, "SELECT"},
-            {parser::INSERT_ACL, "INSERT"},
-            {parser::UPDATE_ACL, "UPDATE"},
-            {parser::DELETE_ACL, "DELETE"},
-            {parser::CREATE_ACL, "CREATE"},
-            {parser::DROP_ACL, "DROP"},
-            {parser::RELOAD_ACL, "RELOAD"},
-            {parser::SHUTDOWN_ACL, "SHUTDOWN"},
-            {parser::PROCESS_ACL, "PROCESS"},
-            {parser::FILE_ACL, "FILE"},
-//            {parser::GRANT_ACL, "GRANT"},
-            {parser::REFERENCES_ACL, "REFERENCES"},
-            {parser::INDEX_ACL, "INDEX"},
-            {parser::ALTER_ACL, "ALTER"},
-            {parser::SHOW_DB_ACL, "SHOW DATABASES"},
-            {parser::SUPER_ACL, "SUPER"},
-            {parser::CREATE_TMP_ACL, "CREATE TABLESPACE"},
-            {parser::LOCK_TABLES_ACL, "LOCK TABLES"},
-            {parser::EXECUTE_ACL, "EXECUTE"},
-            {parser::REPL_SLAVE_ACL, "REPLICATION SLAVE"},
-            {parser::REPL_CLIENT_ACL, "REPLICATION CLIENT"},
-            {parser::CREATE_VIEW_ACL, "CREATE VIEW"},
-            {parser::SHOW_VIEW_ACL, "SHOW VIEW"},
-            {parser::CREATE_PROC_ACL, "CREATE ROUTINE"},
-            {parser::ALTER_PROC_ACL, "ALTER ROUTINE"},
-            {parser::CREATE_USER_ACL, "CREATE USER"},
-            {parser::EVENT_ACL, "EVENT"},
-            {parser::TRIGGER_ACL, "TRIGGER"},
-            {parser::CREATE_TABLESPACE_ACL, "CREATE TABLESPACE"},
-            {parser::PROXY_ACL, "PROXY"},
-            {parser::NO_ACCESS_ACL, "USAGE"},
-    };
-
-
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    if (factory == nullptr || client == nullptr) {
-        DB_FATAL("param invalid");
-        return false;
-    }
-    std::string username;
-    if (split_vec.size() == 2) {
-        username = client->user_info->username;
-    } else if (split_vec.size() == 4) {
-        if (try_to_lower(split_vec[3]) == "current_user" ||
-            try_to_lower(split_vec[3]) == "current_user()") {
-            username = client->user_info->username;
-        } else {
-            username = split_vec[3];
-            // 'name'@'ip' => 'name'
-            size_t pos = username.find("@");
-            if (pos != std::string::npos) {
-                username = username.substr(0, pos);
+    // table split_lines > 1000,0000
+    {
+        std::unordered_map<int64_t, int64_t> table_id_split_lines_map;
+        factory->get_all_table_split_lines(table_id_split_lines_map, 10000000);
+        for (auto& abnormal_split_line : table_id_split_lines_map) {
+            int64_t table_id = abnormal_split_line.first;
+            std::string table_name = std::to_string(table_id);
+            auto table_info = factory->get_table_info(table_id);
+            if (table_info.name != "") {
+                table_name = table_info.name;
             }
-            // trim ' " `
-            auto trim = [] (std::string str) -> std::string {
-                size_t first = str.find_first_not_of(" `\'\"");
-                if (first == std::string::npos)
-                    return "";
-                size_t last = str.find_last_not_of(" `\'\"");
-                return str.substr(first, (last-first+1));
-            };
-            username = trim(username);
-        }
-    } else {
-        DB_FATAL("param invalid");
-        return false;
-    }
-
-    auto info = factory->get_user_info(username);
-    if (info == nullptr) {
-        DB_WARNING("user name not exist [%s]", username.c_str());
-        _wrapper->make_err_packet(client, ER_NO_SUCH_USER, "No Such User");
-        client->state = STATE_READ_QUERY_RESULT;
-        return false;
-    }
-
-
-
-    auto get_priv_str = [&privs] (uint32_t acl, uint32_t all_acl, std::string& with_grant) -> std::string {
-        std::string priv_str = "";
-        if ((acl & GLOBAL_ACLS) == GLOBAL_ACLS) {
-            priv_str += "ALL ";
-        } else {
-            bool is_first = true;
-            for (auto& p : privs) {
-                 if (p.first & acl) {
-                     if (is_first) {
-                         priv_str += p.second;
-                         is_first = false;
-                     } else {
-                         priv_str += ", " + p.second;
-                     }
-
-                 }
-             }
-        }
-        if (acl & parser::GRANT_ACL) {
-            with_grant = " WITH GRANT OPTION";
-        }
-        return priv_str;
-    };
-
-    // Make fields.
-    std::vector<ResultField> fields;
-    ResultField field;
-    field.name = "Grants for " + username;
-    field.type = MYSQL_TYPE_VARCHAR;
-    field.length = 1024;
-    fields.emplace_back(field);
-
-
-    pb::QueryRequest request;
-    pb::QueryResponse response;
-    request.set_op_type(pb::QUERY_USERPRIVILEG);
-    request.set_user_name(username);
-    MetaServerInteract::get_instance()->send_request("query", request, response);
-
-    // Make rows.
-    std::vector< std::vector<std::string> > rows;
-    for(auto user_privilege : response.user_privilege()) {
-        if (user_privilege.has_acl()) { // GRANT_LEVEL_GLOBAL
-            std::vector<std::string> row;
-            std::string priv_level = "*.*";
-            std::string with_grant = "";
-            std::string priv_str = get_priv_str(user_privilege.acl(), GLOBAL_ACLS, with_grant);
-            char msg[1024];
-            snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
-                     priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
-            row.emplace_back(msg);
+            std::vector<std::string> row = {"split_line",
+                                            table_name,
+                                            std::to_string(abnormal_split_line.second)};
             rows.emplace_back(row);
-        }
-        for (auto db : user_privilege.privilege_database()) {
-            if (db.has_acl()) { // GRANT_LEVEL_DB
-                std::vector<std::string> row;
-                std::string priv_level = db.database() + ".*";
-                std::string with_grant = "";
-                std::string priv_str = get_priv_str(db.acl(), DB_ACLS, with_grant);
-                char msg[1024];
-                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
-                         priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
-                row.emplace_back(msg);
-                rows.emplace_back(row);
-            }
-        }
-        for (auto table : user_privilege.privilege_table()) {
-            if (table.has_acl()) { // GRANT_LEVEL_TABLE
-                std::vector<std::string> row;
-                std::string priv_level = table.database() + "." + table.table_name();
-                std::string with_grant = "";
-                std::string priv_str = get_priv_str(table.acl(), TABLE_ACLS, with_grant);
-                char msg[1024];
-                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
-                         priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
-                row.emplace_back(msg);
-                rows.emplace_back(row);
-            }
         }
     }
 

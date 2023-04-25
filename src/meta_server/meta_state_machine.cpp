@@ -121,7 +121,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
         response->set_leader(_node.leader_id().to_string());
         return;
     }
-    DB_NOTICE("baikaldb request[%s]", request->ShortDebugString().c_str());
+    DB_DEBUG("baikaldb request[%s]", request->ShortDebugString().c_str());
     TimeCost step_time_cost;
     ON_SCOPE_EXIT([]() {
         Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();
@@ -182,9 +182,9 @@ void MetaStateMachine::baikal_other_heartbeat(google::protobuf::RpcController* c
         return;
     }
     TimeCost step_time_cost;
-    Concurrency::get_instance()->baikal_heartbeat_concurrency.increase_wait();
+    Concurrency::get_instance()->baikal_other_heartbeat_concurrency.increase_wait();
     ON_SCOPE_EXIT([]() {
-        Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();
+        Concurrency::get_instance()->baikal_other_heartbeat_concurrency.decrease_broadcast();
     });
     int64_t wait_time = step_time_cost.get_time();
     step_time_cost.reset();
@@ -397,6 +397,14 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         }
         case pb::OP_UPDATE_SPLIT_LINES: {
             TableManager::get_instance()->update_split_lines(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_MODIFY_PARTITION: {
+            TableManager::get_instance()->modify_partition(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_UPDATE_CHARSET: {
+            TableManager::get_instance()->update_charset(request, iter.index(), done);
             break;
         }
         case pb::OP_UPDATE_MAIN_LOGICAL_ROOM: {

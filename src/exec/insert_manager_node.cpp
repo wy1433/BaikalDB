@@ -17,6 +17,7 @@
 #include "update_manager_node.h"
 #include "insert_node.h"
 #include "network_socket.h"
+#include "query_context.h"
 #include "type_utils.h"
 #include "binlog_context.h"
 #include "auto_inc.h"
@@ -48,6 +49,9 @@ int InsertManagerNode::init_insert_info(UpdateManagerNode* update_manager_node) 
         if (info_ptr == nullptr) {
             DB_WARNING("no index info found with index_id: %ld", index_id);
             return -1;
+        }
+        if (info_ptr->index_hint_status == pb::IHS_DISABLE && info_ptr->state == pb::IS_DELETE_LOCAL) {
+            continue;
         }
         if (info_ptr->type == pb::I_PRIMARY) {
             _pri_info = info_ptr;
@@ -184,6 +188,13 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
                         return -1;
                     }
                 }
+                // 20190101101112 这种转换现在只支持string类型
+                pb::PrimitiveType field_type = table_field_map[_selected_field_ids[i]]->type;
+                if (is_datetime_specic(field_type) && result.is_numberic()) {
+                    result.cast_to(pb::STRING).cast_to(field_type);
+                } else {
+                    result.cast_to(field_type);
+                }
                 record->set_value(record->get_field_by_idx(_selected_field_ids[i] - 1), result);
             }
             for (auto& field : default_fields) {
@@ -195,6 +206,12 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
             //DB_WARNING("record:%s", record->debug_string().c_str());
         }
     } while (!eos);
+
+    //更新子查询信息到外层的state
+    state->inc_num_returned_rows(_sub_query_runtime_state->num_returned_rows());
+    state->inc_num_affected_rows(_sub_query_runtime_state->num_affected_rows());
+    state->inc_num_scan_rows(_sub_query_runtime_state->num_scan_rows());
+    state->inc_num_filter_rows(_sub_query_runtime_state->num_filter_rows());
     if (_table_info->auto_inc_field_id != -1) {
         return AutoInc().update_auto_inc(_table_info, state->client_conn(), state->use_backup(), _origin_records);
     }
@@ -213,10 +230,18 @@ int InsertManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         }
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
+        auto ctx = client->get_query_ctx();
         binlog_ctx->set_table_info(_table_info);
         pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
         auto mutation = binlog_value->add_mutations();
         mutation->set_table_id(_table_id);
+        if (ctx != nullptr) {
+            // basic insert可以不记录SQL TODO
+            mutation->set_sql(ctx->sql);
+            auto stat_info = &(ctx->stat_info);
+            mutation->set_sign(stat_info->sign);
+            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
+        }
         if (is_local) {
             bool need_set_partition_record = true;
             bool has_delete_record = false;

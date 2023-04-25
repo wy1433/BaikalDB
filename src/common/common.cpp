@@ -1,11 +1,11 @@
 // Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -65,11 +65,12 @@ DEFINE_bool(open_service_write_concurrency, true, "open service_write_concurrenc
 DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_bool(schema_ignore_case, false, "whether ignore case when match db/table name");
 DEFINE_bool(disambiguate_select_name, false, "whether use the first when select name is ambiguous, default false");
-DEFINE_int32(new_sign_read_concurrency, 20, "new_sign_read concurrency, default:20");
+DEFINE_int32(new_sign_read_concurrency, 10, "new_sign_read concurrency, default:20");
 DEFINE_bool(open_new_sign_read_concurrency, false, "open new_sign_read concurrency, default: false");
+DEFINE_bool(need_verify_ddl_permission, false, "default true");
 
 int64_t timestamp_diff(timeval _start, timeval _end) {
-    return (_end.tv_sec - _start.tv_sec) * 1000000 
+    return (_end.tv_sec - _start.tv_sec) * 1000000
         + (_end.tv_usec-_start.tv_usec); //macro second
 }
 
@@ -484,7 +485,7 @@ int get_physical_room(const std::string& ip_and_port_str, std::string& physical_
     auto begin = host.find(".");
     auto end = host.find(":");
     if (begin == std::string::npos) {
-        DB_WARNING("host:%s to physical room fail", host.c_str()); 
+        DB_WARNING("host:%s to physical room fail", host.c_str());
         return -1;
     }
     if (end == std::string::npos) {
@@ -501,28 +502,32 @@ int get_physical_room(const std::string& ip_and_port_str, std::string& physical_
 int get_instance_from_bns(int* ret,
                           const std::string& bns_name,
                           std::vector<std::string>& instances,
-                          bool need_alive) {
+                          bool need_alive,
+                          bool white_list) {
 #ifdef BAIDU_INTERNAL
     instances.clear();
     BnsInput input;
     BnsOutput output;
     input.set_service_name(bns_name);
     input.set_type(0);
+    if (white_list) {
+        input.set_type(1);
+    }
     *ret = webfoot::get_instance_by_service(input, &output);
     // bns service not exist
     if (*ret == webfoot::WEBFOOT_RET_SUCCESS ||
             *ret == webfoot::WEBFOOT_SERVICE_BEYOND_THRSHOLD) {
         for (int i = 0; i < output.instance_size(); ++i) {
             if (output.instance(i).status() == 0 || !need_alive) {
-                instances.push_back(output.instance(i).host_ip() + ":" 
+                instances.push_back(output.instance(i).host_ip() + ":"
                         + std::to_string(output.instance(i).port()));
-            }   
+            }
         }
         return 0;
-    }   
+    }
     DB_WARNING("get instance from service fail, bns_name:%s, ret:%d",
             bns_name.c_str(), *ret);
-    return -1; 
+    return -1;
 #else
     return -1;
 #endif
@@ -598,48 +603,48 @@ int get_multi_port_from_bns(int* ret,
                 if (get_dummy_port(dummy_port, output.instance(i).multi_port()) != 0) {
                     instances.push_back(output.instance(i).host_ip() + ":" + dummy_port);
                 }
-            }   
-        }   
+            }
+        }
         return 0;
-    }   
+    }
     DB_WARNING("get instance from service fail, bns_name:%s, ret:%d",
             bns_name.c_str(), *ret);
-    return -1; 
+    return -1;
 #else
     return -1;
 #endif
 }
 
-static unsigned char to_hex(unsigned char x)   {   
-    return  x > 9 ? x + 55 : x + 48;   
+static unsigned char to_hex(unsigned char x)   {
+    return  x > 9 ? x + 55 : x + 48;
 }
 
-static unsigned char from_hex(unsigned char x) {   
-    unsigned char y = '\0';  
-    if (x >= 'A' && x <= 'Z') { 
-        y = x - 'A' + 10;  
-    } else if (x >= 'a' && x <= 'z') { 
-        y = x - 'a' + 10;  
+static unsigned char from_hex(unsigned char x) {
+    unsigned char y = '\0';
+    if (x >= 'A' && x <= 'Z') {
+        y = x - 'A' + 10;
+    } else if (x >= 'a' && x <= 'z') {
+        y = x - 'a' + 10;
     } else if (x >= '0' && x <= '9') {
-        y = x - '0';  
+        y = x - '0';
     }
-    return y;  
-}  
+    return y;
+}
 
 std::string url_decode(const std::string& str) {
-    std::string strTemp = "";  
-    size_t length = str.length();  
-    for (size_t i = 0; i < length; i++)  {  
+    std::string strTemp = "";
+    size_t length = str.length();
+    for (size_t i = 0; i < length; i++)  {
         if (str[i] == '+') {
             strTemp += ' ';
-        }  else if (str[i] == '%')  {  
-            unsigned char high = from_hex((unsigned char)str[++i]);  
-            unsigned char low = from_hex((unsigned char)str[++i]);  
-            strTemp += high * 16 + low;  
-        }  
-        else strTemp += str[i];  
-    }  
-    return strTemp;  
+        }  else if (str[i] == '%')  {
+            unsigned char high = from_hex((unsigned char)str[++i]);
+            unsigned char low = from_hex((unsigned char)str[++i]);
+            strTemp += high * 16 + low;
+        }
+        else strTemp += str[i];
+    }
+    return strTemp;
 }
 
 std::vector<std::string> string_split(const std::string &s, char delim) {
@@ -710,24 +715,24 @@ void other_peer_to_leader(pb::RegionInfo& info) {
 }
 
 std::string url_encode(const std::string& str) {
-    std::string strTemp = "";  
-    size_t length = str.length();  
-    for (size_t i = 0; i < length; i++) {  
-        if (isalnum((unsigned char)str[i]) ||   
-                (str[i] == '-') ||  
-                (str[i] == '_') ||   
-                (str[i] == '.') ||   
+    std::string strTemp = "";
+    size_t length = str.length();
+    for (size_t i = 0; i < length; i++) {
+        if (isalnum((unsigned char)str[i]) ||
+                (str[i] == '-') ||
+                (str[i] == '_') ||
+                (str[i] == '.') ||
                 (str[i] == '~')) {
-            strTemp += str[i];  
+            strTemp += str[i];
         } else if (str[i] == ' ') {
-            strTemp += "+";  
-        } else  {  
-            strTemp += '%';  
-            strTemp += to_hex((unsigned char)str[i] >> 4);  
-            strTemp += to_hex((unsigned char)str[i] % 16);  
-        }  
-    }  
-    return strTemp; 
+            strTemp += "+";
+        } else  {
+            strTemp += '%';
+            strTemp += to_hex((unsigned char)str[i] >> 4);
+            strTemp += to_hex((unsigned char)str[i] % 16);
+        }
+    }
+    return strTemp;
 }
 
 int brpc_with_http(const std::string& host, const std::string& url, std::string& response) {

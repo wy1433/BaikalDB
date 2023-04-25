@@ -52,7 +52,7 @@ int ScalarFnCall::type_inferer() {
         return ret;
     }
     // 兼容mysql， predicate 处理成列的类型
-    switch (_fn.fn_op()) { 
+    switch (_fn.fn_op()) {
         case parser::FT_EQ:
         case parser::FT_IN:
         case parser::FT_NE:
@@ -76,7 +76,7 @@ int ScalarFnCall::type_inferer() {
                 }
             }
             break;
-        } 
+        }
         default:
             break;
     }
@@ -89,7 +89,7 @@ int ScalarFnCall::type_inferer() {
         if (is_logical_and_or_not()) {
             //类型推导过程中分析表达式节点类型是否为bool型
             if (c->col_type() != pb::BOOL) {
-                DB_WARNING("_children is not bool type, ScalarFnCall ExprNode type is [%s], children node_type_is [%s]", 
+                DB_WARNING("_children is not bool type, ScalarFnCall ExprNode type is [%s], children node_type_is [%s]",
                     pb::ExprNodeType_Name(_node_type).c_str(),
                     pb::ExprNodeType_Name(c->node_type()).c_str());
                     ExprNode::_s_non_boolean_sql_cnts << 1;
@@ -115,7 +115,7 @@ int ScalarFnCall::type_inferer() {
     return 0;
 }
 
-// 111 > aaa => aaa < 111 
+// 111 > aaa => aaa < 111
 // (11,22) < (a,b) => (a,b) > (11,22)
 void ScalarFnCall::children_swap() {
     if (_children.size() != 2) {
@@ -222,7 +222,7 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
     }
     std::vector<ExprValue> args;
     for (auto c : _children) {
-        args.push_back(c->get_value(row));
+        args.emplace_back(c->get_value(row));
     }
     //类型转化
     for (int i = 0; i < _fn.arg_types_size(); i++) {
@@ -509,5 +509,23 @@ ExprNode* ScalarFnCall::transfer_from_or_to_in() {
     to->expr_optimize();
     return to;
 }
+ExprValue ScalarFnCall::get_value(const ExprValue& value) {
+    if (_is_row_expr) {
+        return ExprValue::Null();
+    }
+    if (_fn_call == NULL) {
+        return ExprValue::Null();
+    }
+    std::vector<ExprValue> args;
+    for (auto c : _children) {
+        args.emplace_back(c->get_value(value));
+    }
+    //类型转化
+    for (int i = 0; i < _fn.arg_types_size(); i++) {
+        args[i].cast_to(_fn.arg_types(i));
+    }
+    return _fn_call(args).cast_to(_col_type);
+}
+
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

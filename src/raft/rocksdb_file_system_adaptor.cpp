@@ -20,7 +20,7 @@
 #include "log_entry_reader.h"
 
 namespace baikaldb {
-
+DEFINE_int64(snapshot_timeout_min, 10, "snapshot_timeout_min : 10min");
 bool inline is_snapshot_data_file(const std::string& path) {
     butil::StringPiece sp(path);
     if (sp.ends_with(SNAPSHOT_DATA_FILE_WITH_SLASH)) {
@@ -73,6 +73,45 @@ bool RocksdbReaderAdaptor::region_shutdown() {
     return _region_ptr == nullptr || _region_ptr->is_shutdown();
 }
 
+void RocksdbReaderAdaptor::context_reset() {
+    IteratorContextPtr iter_context = nullptr;
+    iter_context.reset(new IteratorContext);
+    if (iter_context == nullptr) {
+        return;
+    }
+    iter_context->reading = _context->reading;
+    iter_context->is_meta_sst = _context->is_meta_sst;
+    iter_context->prefix = _context->prefix;
+    iter_context->upper_bound = _context->upper_bound;
+    iter_context->upper_bound_slice = iter_context->upper_bound;
+    iter_context->applied_index = _context->applied_index;
+    iter_context->snapshot_index = _context->snapshot_index;
+    iter_context->need_copy_data = _context->need_copy_data;
+    iter_context->sc = _context->sc;
+    if (!iter_context->is_meta_sst) {
+        rocksdb::ReadOptions read_options;
+        read_options.snapshot = iter_context->sc->snapshot;
+        read_options.total_order_seek = true;
+        read_options.fill_cache = false;
+        read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
+        rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
+        iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+        iter_context->iter->Seek(iter_context->prefix);
+        iter_context->sc->data_context = iter_context;
+    } else {        
+        rocksdb::ReadOptions read_options;
+        read_options.snapshot = iter_context->sc->snapshot;
+        read_options.prefix_same_as_start = true;
+        read_options.total_order_seek = false;
+        read_options.fill_cache = false;
+        rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
+        iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+        iter_context->iter->Seek(iter_context->prefix);
+        iter_context->sc->meta_context = iter_context;
+    }
+    _context = iter_context;
+}
+
 ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t size) {
     if (_closed) {
         DB_FATAL("rocksdb reader has been closed, region_id: %ld, offset: %ld",
@@ -113,10 +152,19 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                     _region_id, time_cost.get_time(), offset, _context->offset, size, _last_package.size());
             return _last_package.size();
         }
-        DB_FATAL("region_id: %ld, retry last_offset fail time_cost: %ld, "
-                "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
-                _region_id, time_cost.get_time(), _last_offset, offset, _context->offset, size);
-        return -1;
+
+        // 重置 _context
+        if (offset == 0 && _context->offset_update_time.get_time() > FLAGS_snapshot_timeout_min * 60 * 1000 * 1000ULL) {
+            _last_offset = 0;
+            _num_lines = 0;
+            context_reset();
+            DB_FATAL("region_id: %ld, context_reset", _region_id);
+        } else {
+            DB_FATAL("region_id: %ld, retry last_offset fail time_cost: %ld, "
+                    "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
+                    _region_id, time_cost.get_time(), _last_offset, offset, _context->offset, size);
+            return -1;
+        }
     }
 
     size_t count = 0;
@@ -192,6 +240,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         count += read_size;
         ++_num_lines;
         _context->offset += read_size;
+        _context->offset_update_time.reset();
         _context->iter->Next();
     }
     DB_WARNING("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld, "
@@ -577,22 +626,8 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
                                      butil::File::Error* e) {
     TimeCost time_cost;
     (void) file_meta;
-    std::string prefix;
-    std::string upper_bound;
-    size_t len = path.size();
-    if (is_snapshot_data_file(path)) {
-        len -= SNAPSHOT_DATA_FILE.size();
-        MutTableKey key;
-        key.append_i64(_region_id);
-        prefix = key.data();
-        key.append_u64(UINT64_MAX);
-        upper_bound = key.data();
-
-    } else {
-        len -= SNAPSHOT_META_FILE.size();
-        prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
-    }
-    const std::string snapshot_path = path.substr(0, len - 1);
+    //find dirname
+    const std::string snapshot_path = path.substr(0, path.find_last_of('/'));
     //超时raft_copy_remote_file_timeout_ms，配了300s才重试
     //所以不加锁也没问题(除非这个函数能执行300s)，为了保险换把锁保证串行
     BAIDU_SCOPED_LOCK(_open_reader_adaptor_mutex);
@@ -603,6 +638,24 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             *e = butil::File::FILE_ERROR_NOT_FOUND;
         }
         return nullptr;
+    }
+
+    std::string prefix;
+    std::string upper_bound;
+    if (is_snapshot_data_file(path)) {
+        MutTableKey key;
+        key.append_i64(_region_id);
+        prefix = key.data();
+        key.append_u64(UINT64_MAX);
+        upper_bound = key.data();
+        auto region_ptr = Store::get_instance()->get_region(_region_id);
+        if (region_ptr != nullptr && region_ptr->is_binlog_region()) {
+            key.replace_i64(region_ptr->get_table_id(), 8);
+            key.append_i64(sc->binlog_check_point);
+            prefix = key.data();
+        }
+    } else {
+        prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
     }
 
     bool is_meta_reader = false;
@@ -617,6 +670,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context->is_meta_sst = false;
             iter_context->upper_bound = upper_bound;
             iter_context->upper_bound_slice = iter_context->upper_bound;
+            iter_context->sc = sc.get();
             rocksdb::ReadOptions read_options;
             read_options.snapshot = sc->snapshot;
             read_options.total_order_seek = true;
@@ -659,6 +713,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context.reset(new IteratorContext);
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = true;
+            iter_context->sc = sc.get();
             rocksdb::ReadOptions read_options;
             read_options.snapshot = sc->snapshot;
             read_options.prefix_same_as_start = true;
@@ -752,13 +807,13 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
     DB_WARNING("region_id: %ld lock_commit_meta_mutex before open snapshot", _region_id);
     _snapshots[path].ptr.reset(new SnapshotContext());
     region = Store::get_instance()->get_region(_region_id);
-    int64_t data_index = region->get_data_index();
-    _snapshots[path].ptr->data_index = data_index;
+    _snapshots[path].ptr->data_index = region->get_data_index();
+    _snapshots[path].ptr->binlog_check_point = region->get_binlog_check_point();
     region->unlock_commit_meta_mutex();
     _snapshots[path].count++;
     _snapshots[path].cost.reset();
-    DB_WARNING("region_id: %ld, data_index:%ld, open snapshot path: %s", 
-            _region_id, data_index, path.c_str());
+    DB_WARNING("region_id: %ld, data_index:%ld, binlog_check_point:%ld, open snapshot path: %s", 
+            _region_id, _snapshots[path].ptr->data_index, _snapshots[path].ptr->binlog_check_point, path.c_str());
     return true;
 }
 
@@ -786,13 +841,8 @@ SnapshotContextPtr RocksdbFileSystemAdaptor::get_snapshot(const std::string& pat
 }
 
 void RocksdbFileSystemAdaptor::close(const std::string& path) {
-    size_t len = path.size();
-    if (is_snapshot_data_file(path)) {
-        len -= SNAPSHOT_DATA_FILE_WITH_SLASH.size();
-    } else {
-        len -= SNAPSHOT_META_FILE_WITH_SLASH.size();
-    }
-    const std::string snapshot_path = path.substr(0, len);
+    //find dirname
+    const std::string snapshot_path = path.substr(0, path.find_last_of('/'));
 
     BAIDU_SCOPED_LOCK(_snapshot_mutex);
     auto iter = _snapshots.find(snapshot_path);

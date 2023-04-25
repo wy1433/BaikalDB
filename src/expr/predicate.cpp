@@ -18,7 +18,7 @@
 
 namespace baikaldb {
 
-DEFINE_bool(like_predicate_use_re2, true, "LikePredicate use re2");
+DEFINE_bool(like_predicate_use_re2, false, "LikePredicate use re2");
 
 int InPredicate::open() {
     int ret = 0;
@@ -39,7 +39,7 @@ int InPredicate::open() {
 }
 ExprValue InPredicate::make_key(ExprNode* e, MemRow* row) {
     ExprValue ret(pb::STRING);
-    for (size_t j = 0; j < _col_size; j++) { 
+    for (size_t j = 0; j < _col_size; j++) {
         auto v = e->children(j)->get_value(row);
         if (v.is_null()) {
             return ExprValue::Null();
@@ -66,7 +66,7 @@ int InPredicate::row_expr_open() {
     }
     for (size_t i = 0; i < _col_size; i++) {
         std::vector<pb::PrimitiveType> types = {
-            children(0)->children(i)->col_type(), 
+            children(0)->children(i)->col_type(),
             children(1)->children(i)->col_type()};
         if (all_int(types)) {
             _row_expr_types.push_back(pb::INT64);
@@ -487,11 +487,11 @@ ExprValue RegexpPredicate::get_value(MemRow* row) {
             DB_FATAL("regex error[%d]", _regex_ptr->error_code());
         }
     } catch (std::exception& e) {
-        DB_FATAL("regex error:%s, _regex_pattern:%ss", 
+        DB_FATAL("regex error:%s, _regex_pattern:%ss",
                 e.what(), _regex_pattern.c_str());
         ret._u.bool_val = false;
     } catch (...) {
-        DB_FATAL("regex unknown error: _regex_pattern:%ss", 
+        DB_FATAL("regex unknown error: _regex_pattern:%ss",
                  _regex_pattern.c_str());
         ret._u.bool_val = false;
     }
@@ -539,7 +539,7 @@ rocksdb::Slice LikePredicate::GBKCharset::next_code_point(size_t idx) {
     }
     if (!(str[idx] & 0x80)) {
         return rocksdb::Slice(&str[idx], 1);
-    } else if (idx + 1 < str.size() && in_range(0x81, str[idx], 0xFE) && 
+    } else if (idx + 1 < str.size() && in_range(0x81, str[idx], 0xFE) &&
         (in_range(0x40, str[idx + 1], 0x7E) || in_range(0x80, str[idx + 1], 0xFE))) {
         return rocksdb::Slice(&str[idx], 2);
     }

@@ -27,7 +27,7 @@ namespace baikaldb {
 DECLARE_int64(retry_interval_us);
 DEFINE_int32(transaction_clear_delay_ms, 600 * 1000,
         "delay duration to clear prepared and expired transactions");
-DEFINE_int32(long_live_txn_interval_ms, 900 * 1000,
+DEFINE_int32(long_live_txn_interval_ms, 300 * 1000,
         "delay duration to clear prepared and expired transactions");
 DEFINE_int64(clean_finished_txn_interval_us, 600 * 1000 * 1000LL,
         "clean_finished_txn_interval_us");
@@ -56,18 +56,21 @@ bool TransactionPool::exec_1pc_out_fsm() {
 }
 
 // -1 means insert error (already exists)
-int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id, int64_t txn_timeout) {
+int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn,
+        int64_t primary_region_id,int64_t txn_timeout, int64_t txn_lock_timeout) {
     //int64_t region_id = _region->get_region_id();
     auto call = [this, 
          txn_id,
          primary_region_id,
-         txn_timeout](SmartTransaction& txn) {
+         txn_timeout, txn_lock_timeout](SmartTransaction& txn) {
         txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, this));
         if (txn == nullptr) {
             DB_FATAL("new txn failed, region_id:%ld txn_id: %lu", _region_id, txn_id);
             return -1;
         }
-        auto ret = txn->begin(Transaction::TxnOptions());
+        Transaction::TxnOptions txn_opt;
+        txn_opt.lock_timeout = txn_lock_timeout;
+        auto ret = txn->begin(txn_opt);
         if (ret != 0) {
             DB_FATAL("begin txn failed, region_id:%ld txn_id: %lu", _region_id, txn_id);
             txn.reset();
@@ -575,6 +578,13 @@ void TransactionPool::clear_transactions(Region* region) {
             txn_params.is_finished = txn->is_finished();
         };
         bool exist = _txn_map.call_and_get(txn_id, call);
+        bool mark_finished = is_mark_finished(txn_id);
+        if (mark_finished && exist && !txn_params.is_finished) {
+            DB_WARNING("region_id:%ld txn_id:%lu seq_id: %d txn Out-of-order execution",
+                    txn_params.primary_region_id, txn_id, txn_params.seq_id);
+            txn_commit_through_raft(txn_id, region->region_info(), pb::OP_ROLLBACK);
+            continue ;
+        }
         if (!exist || txn_params.is_primary_region || txn_params.is_finished
             || txn_params.primary_region_id == -1) {
             continue ;

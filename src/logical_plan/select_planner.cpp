@@ -37,7 +37,7 @@ int SelectPlanner::plan() {
     _select = (parser::SelectStmt*)_ctx->stmt;
     if (_select->table_refs == nullptr) {
         if (0 != parse_select_fields()) {
-            return -1;        
+            return -1;
         }
         if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
             create_packet_node(pb::OP_SELECT);
@@ -71,23 +71,29 @@ int SelectPlanner::plan() {
     }
     // parse group by
     if (0 != parse_groupby()) {
-        return -1;        
+        return -1;
     }
     // parse having filter
     if (0 != _parse_having()) {
-        return -1;        
+        return -1;
     }
     // parse order by
     if (0 != parse_orderby()) {
-        return -1;        
+        return -1;
     }
     // parse limit
     if (0 != parse_limit()) {
-        return -1;        
+        return -1;
     }
     // 非相关子查询优化
     if (0 != subquery_rewrite()) {
         return -1;
+    }
+
+    if (_ctx->is_base_subscribe) {
+        if (0 != get_base_subscribe_scan_ref_slot()) {
+            return -1;
+        }
     }
 
     create_scan_tuple_descs();
@@ -141,17 +147,12 @@ bool SelectPlanner::is_full_export() {
     if (_ctx->has_derived_table || _ctx->has_information_schema) {
         return false;
     }
-    if (_select->where != nullptr) {
-        if (!is_fullexport_condition()) {
-            return false;
-        }
-    } 
     if (_select->group != nullptr) {
         return false;
-    } 
+    }
     if (_select->having != nullptr) {
         return false;
-    } 
+    }
     if (_select->order != nullptr) {
         return false;
     }
@@ -164,13 +165,21 @@ bool SelectPlanner::is_full_export() {
     if (_apply_root != nullptr) {
         return false;
     }
-    if (_select->select_opt != nullptr 
+    if (_select->select_opt != nullptr
         && _select->select_opt->distinct == true) {
         return false;
     }
-    if ((_agg_funcs.size() > 0) || (_distinct_agg_funcs.size() > 0) 
+    if ((_agg_funcs.size() > 0) || (_distinct_agg_funcs.size() > 0)
          || (_group_exprs.size() > 0)) {
         return false;
+    }
+    if (_select->where != nullptr) {
+        if (_select->limit == nullptr) {
+            return false;
+        }
+        if (!is_fullexport_condition()) {
+            return false;
+        }
     }
     return true;
 }
@@ -197,7 +206,7 @@ bool SelectPlanner::is_fullexport_condition() {
             ExprNode::destroy_tree(conjunct);
         }
     }));
-    if (conjuncts.size() > 2 || _select->limit == nullptr) {
+    if (conjuncts.size() > 2) {
         return false;
     }
     if (!check_conjuncts(conjuncts)) {
@@ -321,7 +330,7 @@ void SelectPlanner::get_slot_column_mapping() {
                 //DB_WARNING("tuple_id:%d outer_slot_id:%d inter_column_id:%d", iter_out.first, outer_slot_id, inter_column_id);
             }
         }
-    }    
+    }
 }
 
 int SelectPlanner::subquery_rewrite() {
@@ -404,7 +413,7 @@ void SelectPlanner::create_dual_scan_node() {
     scan_node->set_node_type(pb::DUAL_SCAN_NODE);
     scan_node->set_limit(1);
     scan_node->set_is_explain(_ctx->is_explain);
-    scan_node->set_num_children(0); 
+    scan_node->set_num_children(0);
 }
 
 int SelectPlanner::create_limit_node() {
@@ -443,7 +452,7 @@ int SelectPlanner::create_agg_node() {
         agg_node->set_node_type(pb::AGG_NODE);
         agg_node->set_limit(-1);
         agg_node->set_is_explain(_ctx->is_explain);
-        agg_node->set_num_children(1); //TODO 
+        agg_node->set_num_children(1); //TODO
         pb::DerivePlanNode* derive = agg_node->mutable_derive_node();
         pb::AggNode* agg = derive->mutable_agg_node();
 
@@ -469,7 +478,7 @@ int SelectPlanner::create_agg_node() {
     }
     agg_node->set_limit(-1);
     agg_node->set_is_explain(_ctx->is_explain);
-    agg_node->set_num_children(1); //TODO 
+    agg_node->set_num_children(1); //TODO
     pb::DerivePlanNode* derive = agg_node->mutable_derive_node();
     pb::AggNode* agg = derive->mutable_agg_node();
 
@@ -492,7 +501,7 @@ int SelectPlanner::create_agg_node() {
         agg_node2->set_node_type(pb::AGG_NODE);
         agg_node2->set_limit(-1);
         agg_node2->set_is_explain(_ctx->is_explain);
-        agg_node2->set_num_children(1); //TODO 
+        agg_node2->set_num_children(1); //TODO
         pb::DerivePlanNode* derive = agg_node2->mutable_derive_node();
         pb::AggNode* agg2 = derive->mutable_agg_node();
 
@@ -500,21 +509,22 @@ int SelectPlanner::create_agg_node() {
             pb::Expr* expr = agg2->add_group_exprs();
             expr->CopyFrom(_group_exprs[idx]);
         }
-        for (uint32_t idx = 0; idx < _distinct_agg_funcs.size(); ++idx) {
-            if (_distinct_agg_funcs[idx].nodes(0).fn().name() == "group_concat_distinct") {
+        for (auto& distinct_func : _distinct_agg_funcs) {
+            if (distinct_func.nodes(0).fn().name() == "group_concat_distinct") {
                 int expr_idx = 2;
-                for (int i = 0; i < _distinct_agg_funcs[idx].nodes(1).num_children(); i++) {
+                for (int i = 0; i < distinct_func.nodes(1).num_children(); i++) {
                     pb::Expr* expr = agg2->add_group_exprs();
-                    ExprNode::get_pb_expr(_distinct_agg_funcs[idx], &expr_idx, expr);
+                    ExprNode::get_pb_expr(distinct_func, &expr_idx, expr);
                 }
-                continue;
-            }
-            int expr_idx = 1;
-            while (expr_idx < _distinct_agg_funcs[idx].nodes_size()) {
-                pb::Expr* expr = agg2->add_group_exprs();
-                ExprNode::get_pb_expr(_distinct_agg_funcs[idx], &expr_idx, expr);
+            } else {
+                int expr_idx = 1;
+                while (expr_idx < distinct_func.nodes_size()) {
+                    pb::Expr* expr = agg2->add_group_exprs();
+                    ExprNode::get_pb_expr(distinct_func, &expr_idx, expr);
+                }
             }
         }
+
         for (uint32_t idx = 0; idx < _orderby_agg_exprs.size(); ++idx) {
             pb::Expr* expr = agg2->add_group_exprs();
             expr->CopyFrom(_orderby_agg_exprs[idx]);
@@ -667,16 +677,23 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         _select_names.emplace_back(select_name);
         std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
     }
-    
+
+    if (_ctx->is_base_subscribe) {
+        if (!field->as_name.empty() && field->expr->expr_type == parser::ET_COLUMN) {
+            parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
+            _ctx->base_subscribe_select_name_alias_map[field->as_name.c_str()] = column->name.c_str();
+        }
+    }
+
     _select_exprs.emplace_back(select_expr);
     _ctx->field_column_id_mapping[select_name] = _column_id++;
     return 0;
 }
 
-// The ALL and DISTINCT modifiers specify whether duplicate rows should be returned. 
-// ALL (the default) specifies that all matching rows should be returned, including duplicates. 
-// DISTINCT specifies removal of duplicate rows from the result set. 
-// It is an error to specify both modifiers. 
+// The ALL and DISTINCT modifiers specify whether duplicate rows should be returned.
+// ALL (the default) specifies that all matching rows should be returned, including duplicates.
+// DISTINCT specifies removal of duplicate rows from the result set.
+// It is an error to specify both modifiers.
 // DISTINCTROW is a synonym for DISTINCT.
 // ref: https://dev.mysql.com/doc/refman/5.7/en/select.html
 int SelectPlanner::parse_select_fields() {
@@ -703,6 +720,7 @@ int SelectPlanner::parse_where() {
     if (_select->where == nullptr) {
         return 0;
     }
+    _where_filters.reserve(8);
     if (0 != flatten_filter(_select->where, _where_filters, CreateExprOptions())) {
         DB_WARNING("flatten_filter failed");
         return -1;
@@ -780,7 +798,7 @@ void SelectPlanner::create_agg_tuple_desc() {
     }
     // slot_id => slot desc mapping
     std::map<int32_t, pb::SlotDescriptor> id_slot_mapping;
-    
+
     pb::TupleDescriptor agg_tuple;
     agg_tuple.set_tuple_id(_agg_tuple_id);
     for (auto& iter : _agg_slot_mapping) {
@@ -796,6 +814,30 @@ void SelectPlanner::create_agg_tuple_desc() {
     }
     _ctx->add_tuple(agg_tuple);
     return;
+}
+
+int SelectPlanner::get_base_subscribe_scan_ref_slot() {
+    auto pk_field_info_ptr = _factory->get_index_info_ptr(_ctx->base_subscribe_table_id);
+    if (pk_field_info_ptr == nullptr) {
+        DB_WARNING("Fail to get_index_info_ptr, index_id: %ld", _ctx->base_subscribe_table_id);
+        return -1;
+    }
+    for (const auto& field_info : pk_field_info_ptr->fields) {
+        get_scan_ref_slot(_ctx->base_subscribe_table_name, field_info.table_id, field_info.id, field_info.type);
+    }
+
+    auto table_info_ptr = _factory->get_table_info_ptr(_ctx->base_subscribe_table_id);
+    if (table_info_ptr == nullptr) {
+        DB_WARNING("Fail to get_table_info_ptr, table_id: %ld", _ctx->base_subscribe_table_id);
+        return -1;
+    }
+    for (const auto& field_info : table_info_ptr->fields) {
+        if (field_info.short_name == _ctx->base_subscribe_filter_field) {
+            get_scan_ref_slot(_ctx->base_subscribe_table_name, field_info.table_id, field_info.id, field_info.type);
+            break;
+        }
+    }
+    return 0;
 }
 
 // pb::SlotDescriptor& SelectPlanner::_get_group_expr_slot() {

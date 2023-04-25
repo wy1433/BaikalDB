@@ -17,6 +17,8 @@
 
 namespace baikaldb {
 
+DEFINE_bool(check_condition_again_for_global_index, false, "avoid write skew for global index if true");
+
 int LockPrimaryNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -113,6 +115,10 @@ int LockPrimaryNode::open(RuntimeState* state) {
         // 新加索引还未同步到store
         if (index_info == nullptr) {
             DB_WARNING("get index info failed index_id: %ld", index_id);
+            continue;
+        }
+        if (index_info->index_hint_status == pb::IHS_DISABLE
+            && index_info->state == pb::IS_DELETE_LOCAL) {
             continue;
         }
         if (!index_info->is_global) {
@@ -217,7 +223,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
         case pb::LOCK_GET_DML: {
             for (auto& record : delete_records) {
                 //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-                ret = delete_row(state, record);
+                ret = delete_row(state, record, nullptr);
                 if (ret < 0) {
                     DB_WARNING_STATE(state, "delete_row fail");
                     return -1;

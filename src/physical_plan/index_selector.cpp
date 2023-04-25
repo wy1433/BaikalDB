@@ -59,8 +59,8 @@ int IndexSelector::analyze(QueryContext* ctx) {
         bool index_has_null = false;
         if (join_node != NULL || agg_node != NULL) {
             ret =index_selector(ctx->tuple_descs(),
-                            static_cast<ScanNode*>(scan_node_ptr), 
-                            filter_node, 
+                            static_cast<ScanNode*>(scan_node_ptr),
+                            filter_node,
                             NULL,
                             join_node,
                             &index_has_null,
@@ -68,12 +68,12 @@ int IndexSelector::analyze(QueryContext* ctx) {
                             ctx->stat_info.sample_sql.str());
         } else {
             ret = index_selector(ctx->tuple_descs(),
-                           static_cast<ScanNode*>(scan_node_ptr), 
-                           filter_node, 
+                           static_cast<ScanNode*>(scan_node_ptr),
+                           filter_node,
                            sort_node,
                            join_node,
                            &index_has_null,
-                           field_range_type, 
+                           field_range_type,
                            ctx->stat_info.sample_sql.str());
         }
         if (index_has_null) {
@@ -107,8 +107,8 @@ inline bool is_index_predicate(ExprNode* expr) {
                     return false;
             }
         }
-        case pb::IN_PREDICATE: 
-        case pb::LIKE_PREDICATE: 
+        case pb::IN_PREDICATE:
+        case pb::LIKE_PREDICATE:
             return true;
         default:
             return false;
@@ -116,7 +116,7 @@ inline bool is_index_predicate(ExprNode* expr) {
 }
 
 // https://dev.mysql.com/doc/refman/5.6/en/comparison-operators.html#operator_less-than-or-equal
-void IndexSelector::hit_row_field_range(ExprNode* expr, 
+void IndexSelector::hit_row_field_range(ExprNode* expr,
         std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null) {
     RowExpr* row_expr = static_cast<RowExpr*>(expr->children(0));
     std::map<size_t, SlotRef*> slots;
@@ -226,7 +226,7 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
     }
 }
 
-void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map, 
+void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map,
     int64_t table_id, FulltextInfoNode* fulltext_index_node) {
     bool new_fulltext_flag = true;
     std::vector<ExprNode*> or_exprs;
@@ -242,7 +242,7 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
             return;
         }
     }
-    std::vector<int64_t> index_ids; 
+    std::vector<int64_t> index_ids;
     index_ids.reserve(2);
     {
         // or 只能全部是倒排索引才能选择。
@@ -299,12 +299,12 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
             or_node.children.back()->info = std::make_pair(index_ids[index_ids_index++], std::move(fulltext_or_range));
             or_node.children.back()->type = pb::FNT_TERM;
         }
-        
+
     }
     return;
 }
 
-void IndexSelector::hit_match_against_field_range(ExprNode* expr, 
+void IndexSelector::hit_match_against_field_range(ExprNode* expr,
     std::map<int32_t, FieldRange>& field_range_map, FulltextInfoNode* fulltext_index_node, int64_t table_id) {
     SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0)->children(0));
     int32_t field_id = slot_ref->field_id();
@@ -334,14 +334,14 @@ void IndexSelector::hit_match_against_field_range(ExprNode* expr,
         inner_node.children.back()->info = std::make_pair(index_id, std::move(fulltext_match_range));
         inner_node.children.back()->type = pb::FNT_TERM;
     }
-    
+
     return;
 }
 
-void IndexSelector::hit_field_range(ExprNode* expr, 
-        std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null, 
+void IndexSelector::hit_field_range(ExprNode* expr,
+        std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null,
             int64_t table_id, FulltextInfoNode* fulltext_index_node) {
-    if (expr->node_type() == pb::OR_PREDICATE) { 
+    if (expr->node_type() == pb::OR_PREDICATE) {
         return hit_field_or_like_range(expr, field_range_map, table_id, fulltext_index_node);
     }
     if (expr->node_type() == pb::FUNCTION_CALL) {
@@ -465,8 +465,8 @@ void IndexSelector::hit_field_range(ExprNode* expr,
 }
 
 int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tuple_descs,
-                                    ScanNode* scan_node, 
-                                    FilterNode* filter_node, 
+                                    ScanNode* scan_node,
+                                    FilterNode* filter_node,
                                     SortNode* sort_node,
                                     JoinNode* join_node,
                                     bool* index_has_null,
@@ -484,7 +484,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         mutable_derive_node()->mutable_scan_node();
 
     std::vector<ExprNode*>* conjuncts = filter_node ? filter_node->mutable_conjuncts() : nullptr;
-    
+
     // 重构思路：先计算单个field的range范围，然后index根据field的范围情况进一步计算
     // field_id => range映射
     std::map<int32_t, FieldRange> field_range_map;
@@ -533,10 +533,10 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         }
     }
     std::set<int64_t> ignore_indexs;
-    ignore_indexs.insert(std::begin(pb_scan_node->ignore_indexes()), 
+    ignore_indexs.insert(std::begin(pb_scan_node->ignore_indexes()),
             std::end(pb_scan_node->ignore_indexes()));
 
-    auto pri_ptr = _factory->get_index_info_ptr(table_id); 
+    auto pri_ptr = _factory->get_index_info_ptr(table_id);
     if (pri_ptr == nullptr) {
         DB_WARNING("pk info not found:%ld", table_id);
         return -1;
@@ -547,7 +547,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         if (ignore_indexs.count(index_id) == 1 && index_id != table_id) {
             continue;
         }
-        auto info_ptr = _factory->get_index_info_ptr(index_id); 
+        auto info_ptr = _factory->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
             continue;
         }
@@ -560,7 +560,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         pb::IndexType index_type = index_info.type;
         auto index_state = index_info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ",
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -595,7 +595,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         access_path->index_id = index_id;
         if (index_info.index_hint_status == pb::IHS_VIRTUAL) {
             access_path->is_virtual = true;
-        } 
+        }
         Property sort_property;
         if (sort_node != nullptr) {
             sort_property = sort_node->sort_property();
@@ -619,9 +619,67 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         access_path->calc_is_covering_index(tuple_descs[tuple_id], calc_covering_user_slots);
         scan_node->add_access_path(access_path);
     }
+    // 分区表解析分区信息
+    select_partition(table_info, scan_node, field_range_map);
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
-    scan_node->set_expr_field_map(&expr_field_map);
-    return scan_node->select_index_in_baikaldb(sample_sql); 
+    scan_node->set_expr_field_map(std::move(expr_field_map));
+    return scan_node->select_index_in_baikaldb(sample_sql);
+}
+
+int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
+    std::map<int32_t, range::FieldRange>& field_range_map) {
+    if (table_info->partition_ptr != nullptr) {
+        std::set<int64_t> partition_ids;
+        int64_t table_id = table_info->id;
+        if (_ctx != nullptr) {
+            auto name_iter = _ctx->table_partition_names.find(table_id);
+            if (name_iter != _ctx->table_partition_names.end()) {
+                if (0 != _factory->get_partition_ids_by_name(table_id, name_iter->second, partition_ids)) {
+                    DB_WARNING("get partition failed.");
+                    return -1;
+                }
+                scan_node->replace_partition(partition_ids, true);
+                return 0;
+            }
+        }
+        auto partition_type = table_info->partition_ptr->partition_type();
+        auto field_iter = field_range_map.find(table_info->partition_ptr->partition_field_id());
+        if (partition_type == pb::PT_HASH) {
+            if (field_iter != field_range_map.end() && !field_iter->second.eq_in_values.empty()) {
+                const size_t MAX_FLATSET_INIT_VALUE = 12501; // 10000 / 0.8 + 1
+                size_t flatset_init_value = field_iter->second.eq_in_values.size() / 0.8 + 1;
+                if (flatset_init_value > MAX_FLATSET_INIT_VALUE) {
+                    flatset_init_value = MAX_FLATSET_INIT_VALUE;
+                }
+                ExprValueFlatSet eq_in_values_set;
+                eq_in_values_set.init(flatset_init_value);
+                for (auto& value : field_iter->second.eq_in_values) {
+                    eq_in_values_set.insert(value);
+                }
+                for (auto& value : eq_in_values_set) {
+                    int64_t partition_index = 0;
+                    if (table_info->partition_num != 1) {
+                        partition_index = table_info->partition_ptr->calc_partition(value);
+                        if (partition_index < 0) {
+                            DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
+                            return -1;
+                        }
+                    }
+                    partition_ids.emplace(partition_index);
+                }
+                scan_node->replace_partition(partition_ids, false);
+            } else {
+                DB_WARNING("table_id:%ld pattern not supported.", table_id);
+                for (int64_t i = 0; i < table_info->partition_num; ++i) {
+                    partition_ids.emplace(i);
+                }
+                scan_node->replace_partition(partition_ids, false);
+            }
+        } else if (partition_type == pb::PT_RANGE) {
+            // todo
+        }
+    }
+    return 0;
 }
 
 }

@@ -142,7 +142,7 @@ int Joiner::strip_out_equal_slots() {
     return 0;
 }
 
-void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes) {
+void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null) {
     //重新做路由选择
     for (auto& exec_node : scan_nodes) {
         RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
@@ -179,12 +179,12 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
                                         filter_node,
                                         sort_node,
                                         NULL,
-                                        NULL, field_range_type, "");
-        if (!_is_explain) {
+                                        &index_has_null, field_range_type, "");
+        if (!_is_explain && !index_has_null) {
             //路由选择,
             //这一块做完索引选择之后如果命中二级索引需要重构mem_row的结构，mem_row已经在run_time
             //init中构造了，需要销毁重新搞(todo)
-            PlanRouter().scan_plan_router(scan_node, get_slot_id, get_tuple_desc, false);
+            PlanRouter().scan_plan_router(scan_node, get_slot_id, get_tuple_desc, false, {});
             ExecNode* related_manager_node = scan_node->get_related_manager_node();
             auto region_infos = scan_node->region_infos();
             //更改scan_node对应的fethcer_node的region信息
@@ -242,7 +242,11 @@ int Joiner::fetcher_inner_table_data(RuntimeState* state,
     }
     std::vector<ExecNode*> scan_nodes;
     _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
-    do_plan_router(state, scan_nodes);
+    bool index_has_null = false;
+    do_plan_router(state, scan_nodes, index_has_null);
+    if (index_has_null) {
+        _inner_node->set_return_empty();
+    }
     _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {

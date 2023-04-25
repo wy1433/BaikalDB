@@ -1,18 +1,18 @@
 // Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "privilege_manager.h" 
+#include "privilege_manager.h"
 #include <boost/algorithm/string.hpp>
 #ifdef BAIDU_INTERNAL
 #include <baidu/rpc/channel.h>
@@ -27,22 +27,22 @@
 
 namespace baikaldb {
 //合法性检查，真正的处理在state_machine中
-void PrivilegeManager::process_user_privilege(google::protobuf::RpcController* controller, 
+void PrivilegeManager::process_user_privilege(google::protobuf::RpcController* controller,
                                                 const pb::MetaManagerRequest* request,
                                                 pb::MetaManagerResponse* response,
                                                 google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
-    brpc::Controller* cntl = 
+    brpc::Controller* cntl =
             static_cast<brpc::Controller*>(controller);
     uint64_t log_id = 0;
-    if (cntl->has_log_id()) { 
+    if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
     if (!request->has_user_privilege()) {
-        ERROR_SET_RESPONSE(response, 
-                           pb::INPUT_PARAM_ERROR, 
-                           "no user_privilege", 
-                           request->op_type(), 
+        ERROR_SET_RESPONSE(response,
+                           pb::INPUT_PARAM_ERROR,
+                           "no user_privilege",
+                           request->op_type(),
                            log_id);
         return;
     }
@@ -50,27 +50,27 @@ void PrivilegeManager::process_user_privilege(google::protobuf::RpcController* c
     case pb::OP_CREATE_USER:
     case pb::OP_MODIFY_USER: {
         if (!request->user_privilege().has_password()) {
-            ERROR_SET_RESPONSE(response, 
-                                pb::INPUT_PARAM_ERROR, 
-                                "no password", 
-                                request->op_type(), 
+            ERROR_SET_RESPONSE(response,
+                                pb::INPUT_PARAM_ERROR,
+                                "no password",
+                                request->op_type(),
                                 log_id);
             return;
         }
         _meta_state_machine->process(controller, request, response,  done_guard.release());
         return;
     }
-    case pb::OP_DROP_USER: 
-    case pb::OP_ADD_PRIVILEGE: 
+    case pb::OP_DROP_USER:
+    case pb::OP_ADD_PRIVILEGE:
     case pb::OP_DROP_PRIVILEGE: {
-        _meta_state_machine->process(controller, request, response,  done_guard.release()); 
+        _meta_state_machine->process(controller, request, response,  done_guard.release());
         return;
-    }    
+    }
     default: {
-        ERROR_SET_RESPONSE(response, 
-                           pb::INPUT_PARAM_ERROR, 
-                           "invalid op_type", 
-                           request->op_type(), 
+        ERROR_SET_RESPONSE(response,
+                           pb::INPUT_PARAM_ERROR,
+                           "invalid op_type",
+                           request->op_type(),
                            log_id);
         return;
     }
@@ -81,7 +81,7 @@ void PrivilegeManager::create_user(const pb::MetaManagerRequest& request, braft:
     auto& user_privilege = const_cast<pb::UserPrivilege&>(request.user_privilege());
     std::string username = user_privilege.username();
     if (_user_privilege.find(username) != _user_privilege.end()) {
-        DB_WARNING("request username has been created, username:%s", 
+        DB_WARNING("request username has been created, username:%s",
                 user_privilege.username().c_str());
         if (user_privilege.if_exist()) {
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username has been repeated");
@@ -121,7 +121,7 @@ void PrivilegeManager::create_user(const pb::MetaManagerRequest& request, braft:
 void PrivilegeManager::drop_user(const pb::MetaManagerRequest& request, braft::Closure* done) {
     auto& user_privilege = const_cast<pb::UserPrivilege&>(request.user_privilege());
     std::string username =  request.user_privilege().username();
-    if (_user_privilege.find(username) == _user_privilege.end()) {                        
+    if (_user_privilege.find(username) == _user_privilege.end()) {
         DB_WARNING("request username not exist, username:%s", username.c_str());
         if (!user_privilege.if_exist()) {
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username not exist");
@@ -197,11 +197,11 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username not exist");
         return;
     }
-    int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);          
+    int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);
     if (ret < 0) {
         DB_WARNING("request not illegal, request:%s",request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "request invalid");
-        return; 
+        return;
     }
     pb::UserPrivilege tmp_mem_privilege = _user_privilege[username];
     for (auto& privilege_database : user_privilege.privilege_database()) {
@@ -221,6 +221,18 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     }
     if (user_privilege.has_acl()) { // grank
         tmp_mem_privilege.set_acl(tmp_mem_privilege.acl() | user_privilege.acl());
+    }
+    if (user_privilege.has_resource_tag()) {
+        tmp_mem_privilege.set_resource_tag(user_privilege.resource_tag());
+    }
+    if (user_privilege.has_ddl_permission()) {
+        tmp_mem_privilege.set_ddl_permission(user_privilege.ddl_permission());
+    }
+    if (user_privilege.has_txn_lock_timeout()) {
+        tmp_mem_privilege.set_txn_lock_timeout(user_privilege.txn_lock_timeout());
+    }
+    if (user_privilege.has_use_read_index()) {
+        tmp_mem_privilege.set_use_read_index(user_privilege.use_read_index());
     }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
@@ -251,11 +263,11 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username not exist");
         return;
     }
-    int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);          
+    int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);
     if (ret < 0) {
-        DB_WARNING("request not illegal, request:%s",request.ShortDebugString().c_str()); 
+        DB_WARNING("request not illegal, request:%s",request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "request invalid");
-        return; 
+        return;
     }
     pb::UserPrivilege tmp_mem_privilege = _user_privilege[username];
     for (auto& privilege_database : user_privilege.privilege_database()) {
@@ -275,6 +287,10 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
     }
     if (user_privilege.has_acl()) { // revoke
         tmp_mem_privilege.set_acl(tmp_mem_privilege.acl() & ~user_privilege.acl());
+    }
+    if (user_privilege.has_resource_tag() && tmp_mem_privilege.has_resource_tag() &&
+        user_privilege.resource_tag() == tmp_mem_privilege.resource_tag()) {
+        tmp_mem_privilege.clear_resource_tag();
     }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
@@ -297,11 +313,11 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
     DB_NOTICE("drop privilege success, request:%s", request.ShortDebugString().c_str());
 }
 
-void PrivilegeManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request, 
+void PrivilegeManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request,
                                                pb::BaikalHeartBeatResponse* response) {
     BAIDU_SCOPED_LOCK(_user_mutex);
     for (auto& user_info : _user_privilege) {
-        auto privilege = response->add_privilege_change_info();    
+        auto privilege = response->add_privilege_change_info();
         *privilege = user_info.second;
     }
 }
@@ -320,7 +336,7 @@ int PrivilegeManager::load_snapshot() {
         std::string username(iter->key().ToString(), privilege_prefix.size());
         pb::UserPrivilege user_privilege;
         if (!user_privilege.ParseFromString(iter->value().ToString())) {
-            DB_FATAL("parse from pb fail when load privilege snapshot, key:%s", 
+            DB_FATAL("parse from pb fail when load privilege snapshot, key:%s",
                      iter->key().data());
             return -1;
         }
@@ -385,7 +401,7 @@ void PrivilegeManager::insert_table_privilege(const pb::PrivilegeTable& privileg
                     mem_privilege_table.set_table_rw(privilege_table.table_rw());
                 }
             }
-            
+
             break;
         }
     }
@@ -430,7 +446,7 @@ void PrivilegeManager::delete_database_privilege(const pb::PrivilegeDatabase& pr
     for (auto& copy_database : copy_mem_privilege.privilege_database()) {
         if (copy_database.database_id() == privilege_database.database_id()) {
             //收回写权限
-            if (privilege_database.has_database_rw() && 
+            if (privilege_database.has_database_rw() &&
                     privilege_database.database_rw() < copy_database.database_rw()) {
                 auto add_database = mem_privilege.add_privilege_database();
                 *add_database = privilege_database;
@@ -457,7 +473,7 @@ void PrivilegeManager::delete_table_privilege(const pb::PrivilegeTable& privileg
     for (auto& copy_table : copy_mem_privilege.privilege_table()) {
         if (database_id == copy_table.database_id() && table_id == copy_table.table_id()) {
             //写权限收回
-            if (privilege_table.has_table_rw() && 
+            if (privilege_table.has_table_rw() &&
                     privilege_table.table_rw() < copy_table.table_rw()) {
                  auto add_table = mem_privilege.add_privilege_table();
                  *add_table = privilege_table;
