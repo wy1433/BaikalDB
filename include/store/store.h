@@ -148,12 +148,15 @@ public:
                                      const pb::RocksStatisticReq* request,
                                      pb::RocksStatisticRes* response,
                                      google::protobuf::Closure* done);
+
     //上报心跳
     void heart_beat_thread();
 
     void send_heart_beat();
 
     void start_db_statistics();
+
+    void check_region_peer_delay();
 
     void reverse_merge_thread();
     void unsafe_reverse_merge_thread();
@@ -249,6 +252,7 @@ public:
     }
     void shutdown_raft() {
         _shutdown = true;
+        _region_peer_delay_bth.join();
         traverse_copy_region_map([](const SmartRegion& region) {
             region->shutdown();
         });
@@ -314,9 +318,37 @@ private:
              raft_total_cost("raft_total_cost", 60),
              dml_time_cost("dml_time_cost", 60),
              select_time_cost("select_time_cost", 60),
+             peer_delay_latency("peer_delay_latency", 60),
              heart_beat_count("heart_beat_count") {
         bthread_mutex_init(&_param_mutex, NULL);
     }
+
+    class TimePeriodChecker {
+    public:
+        TimePeriodChecker(int start_hour, int end_hour) : _start_hour(start_hour),_end_hour(end_hour) {}
+
+        bool now_in_interval_period() {
+            struct tm ptm;
+            time_t timep = time(NULL);
+            localtime_r(&timep, &ptm);
+            int now = ptm.tm_hour;
+            // 跨夜
+            if (_end_hour < _start_hour) {
+                if (now >= _end_hour && now < _start_hour) {
+                    return false;
+                }
+                return true;
+            } else {
+                if (now >= _start_hour && now < _end_hour) {
+                    return true;
+                }
+                return false;
+            }
+        }
+    private:
+        int _start_hour;
+        int _end_hour;
+    };
     
     int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
@@ -333,6 +365,20 @@ private:
     void print_properties(const std::string& name);
     void print_heartbeat_info(const pb::StoreHeartBeatRequest& request);
 private:
+    class RemoveQueueItem {
+    public:
+        RemoveQueueItem(uint64_t uuid, int64_t region_id):
+            _region_uuid(uuid),_drop_region_id(region_id) {}
+        uint64_t region_uuid() const {
+            return _region_uuid;
+        }
+        uint64_t drop_region_id() const {
+            return _drop_region_id;
+        }
+    private:
+        uint64_t _region_uuid;
+        int64_t  _drop_region_id;
+    };
     std::string                             _address;
     std::string                             _physical_room;
     std::string                             _resource_tag;
@@ -377,6 +423,8 @@ private:
     // 定时检测rocksdb是否hang，并且打印rocksdb properties
     Bthread _db_statistic_bth;
 
+    Bthread _region_peer_delay_bth;
+
     std::atomic<int32_t> _split_num;    
     bool _shutdown = false;
     bvar::Status<int64_t> _disk_total;
@@ -412,6 +460,7 @@ public:
     bvar::LatencyRecorder raft_total_cost;
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
+    bvar::LatencyRecorder peer_delay_latency;
     bvar::Adder<int64_t>  heart_beat_count;
 
     //for fake binlog tso

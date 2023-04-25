@@ -36,6 +36,7 @@ private:
     int parse_create_database(pb::DataBaseInfo& database);
     int parse_drop_database(pb::DataBaseInfo& database);
     int parse_alter_table(pb::MetaManagerRequest& alter_request);
+    int check_partition_key_constraint(pb::SchemaInfo& table, const std::string& field_name);
 
     int parse_create_namespace(pb::NameSpaceInfo& namespace_info);
     int parse_drop_namespace(pb::NameSpaceInfo& namespace_info);

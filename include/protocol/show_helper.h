@@ -63,6 +63,8 @@ const std::string SQL_SHOW_INDEXES               = "indexes";               // s
 const std::string SQL_SHOW_KEYS                  = "keys";                  // show keys; same as `show index`
 const std::string SQL_SHOW_NAMESPACES            = "namespaces";            // show namespaces;
 const std::string SQL_SHOW_GRANTS                = "grants";                // show grants for username;
+const std::string SQL_SHOW_PARTITION_TABLE       = "partition_tables";      // show partition table info
+const std::string SQL_SHOW_ABNORMAL_SWITCH       = "abnormal_switch";       // show abnormal_switch
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -113,7 +115,7 @@ private:
     bool _show_full_columns(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show schema_conf database_table;
     bool _show_schema_conf(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    // sql: show all_tables ttl/binlog; 
+    // sql: show all_tables ttl/binlog;
     bool _show_all_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show binlogs_info;
     bool _show_binlogs_info(const SmartSocket& client, const std::vector<std::string>& split_params);
@@ -135,6 +137,7 @@ private:
     bool _show_ddl_work(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show global_ddlwork tableID;
     bool _show_global_ddl_work(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_partition_table(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_diff_region_size(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show user username
     bool _show_user(const SmartSocket& client, const std::vector<std::string>& split_vec);
@@ -152,19 +155,22 @@ private:
     // sql: show grants for username;
     bool _show_grants(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
+    // sql: show abnormal_switch
+    // 异常的switch，如快速导入超一天，表split_lines超1kw行，peer_loadbalance，migrate关闭等
+    bool _show_abnormal_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    int _make_common_resultset_packet(const SmartSocket& sock, 
+    int _make_common_resultset_packet(const SmartSocket& sock,
             std::vector<ResultField>& fields,
             const std::vector<std::vector<std::string>>& rows);
     void _parse_sample_sql(std::string sample_sql, std::string& database, std::string& table, std::string& sql);
 
-    void _query_regions_concurrent(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+    void _query_regions_concurrent(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info,
         std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos);
 
-    bool _process_partition_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+    bool _process_partition_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t,
         std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
 
-    bool _process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+    bool _process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t,
         std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
 
     inline ResultField make_result_field(const std::string& name, const uint8_t& type, const uint32_t& length) const {

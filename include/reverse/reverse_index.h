@@ -156,7 +156,7 @@ public:
         _table_info = table_info;
     }
     virtual int create_executor(const std::string& search_data, 
-            pb::MatchMode mode, pb::SegmentType segment_type) = 0;
+            pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) = 0;
     virtual int next(SmartRecord record) = 0;
 
 protected:
@@ -184,6 +184,7 @@ public:
             int64_t index_id, 
             int length, 
             RocksWrapper* rocksdb,
+            const pb::Charset& charset,
             pb::SegmentType segment_type = pb::S_DEFAULT,
             bool is_over_cache = true,
             bool is_seg_cache = true,
@@ -193,6 +194,7 @@ public:
                         _index_id(index_id),
                         _second_level_length(length),
                         _rocksdb(rocksdb),
+                        _charset(charset),
                         _segment_type(segment_type),
                         _is_over_cache(is_over_cache),
                         _is_seg_cache(is_seg_cache),
@@ -310,39 +312,41 @@ public:
         return schema_info->schema->get_query_words();
     }
 private:
-struct BthreadLocal {
-    Schema* schema = nullptr;
-    std::vector<Schema*> schema_ptrs;
-    static void deleter(void* data) {
-        delete static_cast<BthreadLocal*>(data);
-    }
-};
+    struct BthreadLocal {
+        Schema* schema = nullptr;
+        std::vector<Schema*> schema_ptrs;
+        static void deleter(void* data) {
+            if (data != nullptr) {
+                delete static_cast<BthreadLocal*>(data);
+            }
+        }
+    };
 
-class SchemaLocalKey {
-public:
-    ~SchemaLocalKey() {
-        bthread_key_delete(_schema_local_key);
-    }
+    class SchemaLocalKey {
+    public:
+        ~SchemaLocalKey() {
+            bthread_key_delete(_schema_local_key);
+        }
 
-    static SchemaLocalKey* get_instance() {
-        static SchemaLocalKey _instance;
-        return &_instance;
-    }
+        static SchemaLocalKey* get_instance() {
+            static SchemaLocalKey _instance;
+            return &_instance;
+        }
 
-    void* get_specific() {
-        return bthread_getspecific(_schema_local_key);
-    }
+        void* get_specific() {
+            return bthread_getspecific(_schema_local_key);
+        }
 
-    int set_specific(void* data) {
-        return bthread_setspecific(_schema_local_key, data);
-    }
+        int set_specific(void* data) {
+            return bthread_setspecific(_schema_local_key, data);
+        }
 
-private:
-    SchemaLocalKey() : _schema_local_key(INVALID_BTHREAD_KEY) {
-        bthread_key_create(&_schema_local_key, BthreadLocal::deleter);
-    }
-    bthread_key_t _schema_local_key;
-};
+    private:
+        SchemaLocalKey() : _schema_local_key(INVALID_BTHREAD_KEY) {
+            bthread_key_create(&_schema_local_key, BthreadLocal::deleter);
+        }
+        bthread_key_t _schema_local_key;
+    };
     //0:success    -1:fail
     int handle_reverse(
                         SmartTransaction& txn,
@@ -416,6 +420,7 @@ private:
     std::vector<std::string> _cache_keys;
     // 存储额外字段时需要
     std::map<std::string, int32_t> _name_field_id_map;
+    pb::Charset         _charset;
 };
 
 //多个倒排索引间做or操作，只读
@@ -491,14 +496,17 @@ public:
             return -1;
         }
         try {
-            if (_weight_field_id > 0) {
-                auto field = record->get_field_by_tag(_weight_field_id);
-                record->set_float(field, _cur_node->weight());
+            if (_weight_field != nullptr) {
+                auto field = record->get_field_by_idx(_weight_field->pb_idx);
+                if (field != nullptr) {
+                    MessageHelper::set_float(field, record->get_raw_message(), _cur_node->weight());
+                }
             }
-            if (_query_words_field_id > 0) {
-                DB_DEBUG("set querywords %s", _query_words.c_str());
-                MessageHelper::set_string(record->get_field_by_tag(_query_words_field_id),
-                        record->get_raw_message(), _query_words);
+            if (_query_words_field != nullptr) {
+                auto field = record->get_field_by_idx(_query_words_field->pb_idx);
+                if (field != nullptr) {
+                    MessageHelper::set_string(field, record->get_raw_message(), _query_words);
+                }
             }
         } catch (std::exception& exp) {
             DB_FATAL("pack weight or query words expection %s", exp.what());
@@ -514,8 +522,8 @@ private:
     std::vector<BooleanExecutorBase<typename Schema::PostingNodeT>*> _son_exe_vec;
     std::vector<ReverseIndex<Schema>*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
-    int32_t _weight_field_id = 0;
-    int32_t _query_words_field_id = 0;
+    FieldInfo* _weight_field = nullptr;
+    FieldInfo* _query_words_field = nullptr;
     std::string _query_words;
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     bool _is_fast = false;

@@ -60,16 +60,16 @@ enum IndexHint {
 
     bool need_add_to_learner_paths();
     bool need_select_learner_index();
-    
+
     void calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
-            std::vector<ExprValue>& values, SmartRecord record, size_t field_idx);
+            std::vector<ExprValue>& values, MutTableKey& key, size_t field_idx);
 
     bool check_sort_use_index(Property& sort_property);
 
     void calc_normal(Property& sort_property);
 
     void calc_fulltext();
-    
+
     void fetch_field_ids() {
         if (index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_PRIMARY) {
             for (auto& field : index_info_ptr->fields) {
@@ -81,10 +81,11 @@ enum IndexHint {
             cover_field_ids.insert(field.id);
         }
         if (index_type == pb::I_FULLTEXT) {
-            cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__weight"));
+            cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__weight"));
+            cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__querywords"));
         }
     }
-    
+
     double calc_field_selectivity(int32_t field_id, range::FieldRange& range);
 
     double fields_to_selectivity(const std::unordered_set<int32_t>& field_ids, std::map<int32_t, double>& filed_selectivity);
@@ -136,37 +137,15 @@ enum IndexHint {
     // 参考choose_index函数
     bool is_eq_or_in() {
         return _is_eq_or_in;
-        if (pos_index.ranges_size() > 0) {
-            const auto& range = pos_index.ranges(0);
-            bool is_eq = true;
-            if (range.has_left_key()) {
-                if (range.left_key() != range.right_key()) {
-                    is_eq = false;
-                }
-            } else {
-                if (range.left_pb_record() != range.right_pb_record()) {
-                    is_eq = false;
-                }
-            }
-
-            if (range.left_field_cnt() != range.right_field_cnt()) {
-                is_eq = false;
-            }
-
-            if (range.left_open() || range.right_open()) {
-                is_eq = false;
-            }
-
-            return is_eq && !range.like_prefix();
-        }
-
-        return false;
+    }
+    bool need_filter() {
+        return _need_filter;
     }
     bool need_filter() {
         return _need_filter;
     }
 
-    
+
 public:
     //TODO 先mock一个，后面从schema读取
     static const int64_t INDEX_SEEK_FACTOR = 1;

@@ -79,12 +79,14 @@ public:
                           ExecNode* exec_node,
                           int64_t global_index_id,
                           int64_t main_table_id);
+
     int construct_primary_possible_index(
                           FetcherStore& fetcher_store,
                           ScanIndexInfo* scan_index_info,
                           RuntimeState* state,
                           ExecNode* exec_node,
-                          int64_t main_table_id);
+                          int64_t main_table_id,
+                          LimitNode* limit = nullptr);
 
     int construct_primary_possible_index_use_limit(
                           FetcherStore& fetcher_store,

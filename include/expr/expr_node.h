@@ -16,6 +16,7 @@
 
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include "expr_value.h"
 #include "mem_row.h"
 #include "proto/expr.pb.h"
@@ -111,6 +112,10 @@ public:
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
     }
+    bool is_function_eq();
+    bool is_children_all_eq();
+    bool is_children_all_and();
+
     int expr_optimize() {
         const_pre_calc();
         return type_inferer();
@@ -129,6 +134,17 @@ public:
     //常量表达式预计算,eg. id * 2 + 2 * 4 => id * 2 + 8
     //TODO 考虑做各种左右变化,eg. id + 2 - 4 => id - 2; id * 2 + 4 > 4 / 2 => id > -1
     void const_pre_calc();
+
+    // optimize or node to in node
+    static void  or_node_optimize(ExprNode** expr_node);
+    bool has_same_children();
+    bool is_vaild_or_optimize_tree(int32_t level, std::unordered_set<int32_t>* tuple_set);
+    static int change_or_node_to_in(ExprNode** expr_node);
+    int serialize_tree(uint64_t& serialize_slot_id);
+    void set_is_constant(bool flag) {
+        _is_constant =  flag;
+    }
+
     //参数校验，创建些运行时资源，比如in的map
     virtual int open() {
         for (auto e : _children) {
@@ -142,7 +158,10 @@ public:
     } 
     virtual ExprValue get_value(MemRow* row) { //对每行计算表达式
         return ExprValue::Null();
-    } 
+    }
+    virtual ExprValue get_value(const ExprValue& value) {
+        return ExprValue::Null();
+    }
     //释放open创建的资源
     virtual void close() {
         for (auto e : _children) {
@@ -172,6 +191,7 @@ public:
     void add_child(ExprNode* expr_node) {
         _children.push_back(expr_node);
     }
+    bool contains_null_function();
     bool contains_special_operator(pb::ExprNodeType expr_node_type) {
         bool contain = false;
         recursive_contains_special_operator(expr_node_type, &contain);
@@ -195,11 +215,18 @@ public:
     void del_child(size_t idx) {
         _children.erase(_children.begin() + idx);
     }
+    // 与儿子断开连接
+    void clear_children() {
+        _children.clear();
+    }
     size_t children_size() {
         return _children.size();
     }
     ExprNode* children(size_t idx) {
         return _children[idx];
+    }
+    ExprNode** mutable_children(size_t idx) {
+        return &_children[idx];
     }
     pb::ExprNodeType node_type() {
         return _node_type;

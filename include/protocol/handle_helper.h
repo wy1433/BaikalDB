@@ -41,7 +41,7 @@ const std::string SQL_HANDLE_DROP_REGION                = "meta_drop_region";
 const std::string SQL_HANDLE_SPLIT_LINES                = "split_lines";
 // handle ttl_duration tableName ttl
 const std::string SQL_HANDLE_TTL_DURATION               = "ttl_duration";
-// handle split_region regionID splitKey
+// handle split_region tableID regionId
 const std::string SQL_HANDLE_SPLIT_REGION               = "split_region";
 // handle rm_privilege dbname tableName
 const std::string SQL_HANDLE_RM_PRIVILEGE               = "rm_privilege";
@@ -65,7 +65,7 @@ const std::string SQL_HANDLE_STORE_SET_PEER             = "store_set_peer";
 const std::string SQL_HANDLE_STORE_TRANS_LEADER         = "store_trans_leader";
 // handle add_user namespace username password json
 const std::string SQL_HANDLE_ADD_USER                   = "add_user";
-// handle copy_db db1 db2 
+// handle copy_db db1 db2
 const std::string SQL_HANDLE_COPY_DB                    = "copy_db";
 // handle link_binlog json
 const std::string SQL_HANDLE_LINK_BINLOG                = "link_binlog";
@@ -87,10 +87,11 @@ const std::string SQL_HANDLE_CREATE_NAMESPACE           = "create_namespace";
 const std::string SQL_HANDLE_NETWORK_BALANCE            = "network_balance";
 // handle store_rm_txn storeAddress regionID regionVersion txnID
 const std::string SQL_HANDLE_STORE_RM_TXN               = "store_rm_txn";
-// handle region_adjustkey tableID regionID start_key_region_id end_key_region_id 
+// handle region_adjustkey tableID regionID start_key_region_id end_key_region_id
 const std::string SQL_HANDLE_REGION_ADJUSTKEY           = "region_adjustkey";
 // handle table_learner_resource_tag tableName tag1,tag2...
 const std::string SQL_HANDLE_TABLE_LEARNER_RESOURCE_TAG = "table_learner_resource_tag";
+const std::string SQL_HANDLE_MODIFY_PARTITION           = "modify_partition";
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -129,10 +130,12 @@ private:
     bool _handle_split_lines(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle ttl_duration tbname ttl
     bool _handle_ttl_duration(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    // handle split_region regionID splitKey
+    // handle split_region tableID regionId
     bool _handle_split_region(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle rm_privilege dbname tbname
     bool _handle_rm_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle modify_partition dbname tbname
+    bool _handle_modify_partition(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle delete_ddl tableName
     // handle suspend_ddl tableName
     // handle restart_ddl tableName
@@ -151,7 +154,7 @@ private:
     bool _handle_store_trans_leader(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle add_user namespace username password json
     bool _handle_add_user(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    // handle copy_db db1 db2 
+    // handle copy_db db1 db2
     bool _handle_copy_db(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle link_binlog/unlink_binlog db table binlog_db binlog_table
     bool _handle_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
@@ -174,6 +177,22 @@ private:
     // sql: handle table_learner_resource_tag tableName tag1,tag2...
     bool _handle_table_learner_resource_tag(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _make_response_packet(const SmartSocket& client, const std::string& response);
+    void _make_handle_region_result_rows(const pb::MetaManagerRequest& request,
+        const pb::MetaManagerResponse& response,
+        std::vector<std::vector<std::string>>& rows);
+
+    bool is_packet_learner_result_success(const SmartSocket& client,
+        const pb::QueryRequest& query_req,
+        pb::QueryResponse& query_res);
+
+    bool is_packet_region_result_success(const SmartSocket& client,
+        const pb::MetaManagerRequest& request,
+        pb::MetaManagerResponse& response);
+
+    void update_unhealthy_learners_schema(const pb::QueryRequest& query_req,
+        pb::QueryResponse& query_res,
+        std::vector<std::vector<std::string>>& rows);
+
     int _make_common_resultset_packet(const SmartSocket& sock,
             std::vector<ResultField>& fields,
             std::vector< std::vector<std::string> >& rows);

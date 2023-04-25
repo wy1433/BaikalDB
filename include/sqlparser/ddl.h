@@ -47,22 +47,22 @@ enum MysqlType : unsigned char {
     MYSQL_TYPE_NEWDATE,
     MYSQL_TYPE_VARCHAR,
     MYSQL_TYPE_BIT,
-    MYSQL_TYPE_TIMESTAMP2, 
-    MYSQL_TYPE_DATETIME2, 
+    MYSQL_TYPE_TIMESTAMP2,
+    MYSQL_TYPE_DATETIME2,
     MYSQL_TYPE_TIME2,
     MYSQL_TYPE_TDIGEST      = 242,
     MYSQL_TYPE_BITMAP       = 243,
     MYSQL_TYPE_HLL          = 244,
-    MYSQL_TYPE_JSON         = 245, 
-    MYSQL_TYPE_NEWDECIMAL   = 246, 
-    MYSQL_TYPE_ENUM         = 247, 
-    MYSQL_TYPE_SET          = 248, 
-    MYSQL_TYPE_TINY_BLOB    = 249, 
-    MYSQL_TYPE_MEDIUM_BLOB  = 250, 
-    MYSQL_TYPE_LONG_BLOB    = 251, 
-    MYSQL_TYPE_BLOB         = 252, 
-    MYSQL_TYPE_VAR_STRING   = 253, 
-    MYSQL_TYPE_STRING       = 254, 
+    MYSQL_TYPE_JSON         = 245,
+    MYSQL_TYPE_NEWDECIMAL   = 246,
+    MYSQL_TYPE_ENUM         = 247,
+    MYSQL_TYPE_SET          = 248,
+    MYSQL_TYPE_TINY_BLOB    = 249,
+    MYSQL_TYPE_MEDIUM_BLOB  = 250,
+    MYSQL_TYPE_LONG_BLOB    = 251,
+    MYSQL_TYPE_BLOB         = 252,
+    MYSQL_TYPE_VAR_STRING   = 253,
+    MYSQL_TYPE_STRING       = 254,
     MYSQL_TYPE_GEOMETRY     = 255
 };
 
@@ -149,11 +149,11 @@ enum DatabaseOptionType : unsigned char {
 // https://dev.mysql.com/doc/refman/8.0/en/alter-table.html
 enum AlterSpecType : unsigned char {
     ALTER_SPEC_ADD_COLUMN = 0,   // only support add column at the tail
-    ALTER_SPEC_ADD_INDEX,        
+    ALTER_SPEC_ADD_INDEX,
     ALTER_SPEC_ADD_CONSTRAINT,
     ALTER_SPEC_ADD_FULLTEXT,
 
-    ALTER_SPEC_DROP_COLUMN, 
+    ALTER_SPEC_DROP_COLUMN,
     ALTER_SPEC_DROP_INDEX,
 
     ALTER_SPEC_RENAME_COLUMN,
@@ -163,7 +163,11 @@ enum AlterSpecType : unsigned char {
     ALTER_SPEC_ADD_LEARNER,
     ALTER_SPEC_DROP_LEARNER,
     ALTER_SPEC_MODIFY_COLUMN,
-    ALTER_SPEC_SWAP_TABLE
+    ALTER_SPEC_SWAP_TABLE,
+
+    ALTER_SPEC_ADD_PARTITION,
+    ALTER_SPEC_DROP_PARTITION,
+    ALTER_SPEC_REORGANIZE_PARTITION
 };
 
 enum PartitionType : unsigned char {

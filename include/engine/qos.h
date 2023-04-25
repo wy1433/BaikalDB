@@ -15,6 +15,7 @@
 #pragma once
 
 #include "common.h"
+#include "concurrency.h"
 
 namespace baikaldb {
 DECLARE_int64(sql_token_bucket_timeout_min);
@@ -31,9 +32,10 @@ DECLARE_int64(qos_reject_timeout_s);
 DECLARE_int64(qos_reject_max_scan_ratio);
 DECLARE_int64(qos_reject_growth_multiple);
 DECLARE_int64(qos_need_reject);
+DECLARE_int64(sign_concurrency);
 
 enum QosType {
-    QOS_SELECT           = 0, 
+    QOS_SELECT           = 0,
     QOS_DML              = 1,
     QOS_REVERSE_MERGE    = 2,
     QOS_TYPE_NUM
@@ -41,8 +43,8 @@ enum QosType {
 
 struct IndexCounter {
     IndexCounter() : count(0) { }
-    TimeCost begin_time; 
-    TimeCost last_time;  
+    TimeCost begin_time;
+    TimeCost last_time;
     int      count;
 };
 
@@ -58,7 +60,7 @@ struct SqlInfo {
 class SqlQos;
 
 struct BvarWindowInfo {
-    explicit BvarWindowInfo(int64_t interval_s) : interval_s(interval_s), query_per_window(&query_sum, interval_s) { 
+    explicit BvarWindowInfo(int64_t interval_s) : interval_s(interval_s), query_per_window(&query_sum, interval_s) {
 
     }
 
@@ -159,15 +161,15 @@ public:
 
     ~QosBthreadLocal();
 
-    void get_rate_limiting() {
-        ++_get_count;
+    void get_rate_limiting(int64_t count = 1) {
+        _get_count += count;
         bool need_statistics = false;
-        rate_limiting(1, &need_statistics);
+        rate_limiting(count, &need_statistics);
         if (need_statistics) {
-            ++_get_statistics_count;
+            _get_statistics_count += count;
         }
     }
-    
+
     void scan_rate_limiting() {
         // scan 攒够 _get_token_weight 次，才获取令牌
         if (++_scan_count % _get_token_weight == 0) {
@@ -208,7 +210,7 @@ private:
 
 class SqlQos {
 public:
-    explicit SqlQos(uint64_t sign) 
+    explicit SqlQos(uint64_t sign)
         : _sign(sign)
         , _committed_bucket(false)
         , _get_statistics(FLAGS_qps_statistics_minutes_ago * 60LL)
@@ -217,7 +219,8 @@ public:
         , _scan_real(FLAGS_qos_reject_interval_s)
         , _token_fetch(60)
         , _sql_statistics(FLAGS_qps_statistics_minutes_ago * 60LL)
-        , _sql_real(FLAGS_qos_reject_interval_s) {
+        , _sql_real(FLAGS_qos_reject_interval_s)
+        , _concurrency(-FLAGS_sign_concurrency) {
 
         _start_time = butil::gettimeofday_us();
     }
@@ -238,6 +241,12 @@ public:
     void scan_statistics_adder(int64_t count, int64_t statistics_count);
 
     void sql_statistics_adder(int64_t count);
+
+    int increase_timed_wait(const int64_t reject_timeout);
+
+    int increase_wait();
+
+    int decrease_signal();
 
     void inc_index_count(const int64_t index_id) {
         bool print_log = false;
@@ -287,8 +296,12 @@ public:
         get_qps   = _get_qps;
         scan_qps  = _scan_qps;
         if (get_qps != 0 || scan_qps != 0) {
-            DB_WARNING("sign: %lu, get_qps: %ld, scan_qps: %ld, sql_qps: %ld, get_real: %ld, scan_real: %ld, token_fetch_qps: %ld", 
-                _sign, get_qps, scan_qps, _sql_qps, _get_real.get_qps_value(), _scan_real.get_qps_value(), _token_fetch.get_qps_value());
+            DB_WARNING("sign: %lu, get_qps: %ld, scan_qps: %ld, sql_qps: %ld,"
+                       " get_real: %ld, scan_real: %ld, token_fetch_qps: %ld,"
+                       " concurrency: %d",
+                        _sign, get_qps, scan_qps, _sql_qps,
+                        _get_real.get_qps_value(), _scan_real.get_qps_value(), _token_fetch.get_qps_value(),
+                        _concurrency.count());
         }
 
         std::lock_guard<bthread::Mutex> lock(_mutex);
@@ -303,8 +316,8 @@ public:
                 ++it;
             }
         }
-    } 
-    
+    }
+
     std::set<uint64_t> fill_sqlqos_info(std::map<uint64_t, SqlInfo>& sql_with_multi_index) {
         SqlInfo sql_info;
         sql_info.scan_short_term = _scan_real.get_qps_value();
@@ -312,7 +325,7 @@ public:
         sql_info.get_long_term   = _get_statistics.get_qps_value();
         sql_info.scan_long_term  = _scan_statistics.get_qps_value();
         sql_info.sign = _sign;
-    
+
         std::set<uint64_t> affect_indexids;
         // 判断是否使用多索引
         bool multi_index = false;
@@ -330,7 +343,7 @@ public:
         uint64_t reject_index = _reject_index_id.load(std::memory_order_relaxed);
         if (multi_index && reject_index == 0) {
             sql_with_multi_index[_sign] = sql_info;
-        }  
+        }
 
         if (reject_index == 0) {
             affect_indexids.clear();
@@ -347,14 +360,14 @@ public:
 
     int64_t start_time() { return _start_time; }
 
-    void set_need_reject(const uint64_t index_id) { _reject_index_id = index_id; } 
+    void set_need_reject(const uint64_t index_id) { _reject_index_id = index_id; }
 
     bool need_reject(const uint64_t index_id) {
         if (index_id != 0 && index_id == _reject_index_id.load(std::memory_order_relaxed)) {
             return true;
         }
 
-        return false; 
+        return false;
     }
 
     bool is_new_sign() {
@@ -394,6 +407,9 @@ private:
     int64_t _sql_qps  = 0;
     bthread::Mutex _mutex; // 是否有不加锁的办法 TODO
     std::map<uint64_t, IndexCounter> _indexid_count;
+
+    // 并发控制
+    BthreadCond _concurrency;
 
     DISALLOW_COPY_AND_ASSIGN(SqlQos);
 };
@@ -440,7 +456,7 @@ private:
 using DoubleBufQos =  butil::DoublyBufferedData<std::unordered_map<uint64_t, std::shared_ptr<SqlQos>>>;
 class StoreQos {
 public:
-    
+
     ~StoreQos() {
         bthread_key_delete(_bthread_local_key);
     }
@@ -476,7 +492,8 @@ public:
             total_scan_qps += scan_qps;
         }
 
-        DB_WARNING("total_get_qps: %ld, total_scan_qps: %ld", total_get_qps, total_scan_qps);
+        DB_WARNING("total_get_qps: %ld, total_scan_qps: %ld, global select concurrency: %d",
+                total_get_qps, total_scan_qps, Concurrency::get_instance()->global_select_concurrency.count());
     }
 
     // return index_id
@@ -493,7 +510,7 @@ public:
                     break;
                 }
             }
-        } 
+        }
         token_long_term = token_long_term > 0 ? token_long_term : 1;
         if (f) {
             pre_reject = token_short_term > token_long_term ? true : false;
@@ -552,7 +569,7 @@ public:
         {
             DoubleBufQos::ScopedPtr ptr;
             if (_sign_sqlqos_map.Read(&ptr) != 0) {
-                return nullptr; 
+                return nullptr;
             }
             auto iter = ptr->find(sign);
             if (iter != ptr->end()) {
@@ -581,7 +598,7 @@ public:
             return;
         }
         bthread_getspecific(_bthread_local_key);
-        int ret = bthread_setspecific(_bthread_local_key, local); 
+        int ret = bthread_setspecific(_bthread_local_key, local);
         if (ret < 0) {
             delete local;
             return;
@@ -610,23 +627,15 @@ public:
         return local;
     }
 
-    bool is_new_sign() {
+    bool is_new_sign(std::shared_ptr<SqlQos> sqlqos_ptr) {
+        if (sqlqos_ptr == nullptr) {
+            return false;
+        }
         if (_start_time.get_time() <= FLAGS_qps_statistics_minutes_ago * 2 * 60LL * 1000000LL) {
-//            DB_NOTICE("StoreQos start time(s): %ld", _start_time.get_time() / 1000000LL);
+            // DB_NOTICE("StoreQos start time(s): %ld", _start_time.get_time() / 1000000LL);
             return false;
         }
-        void* data = bthread_getspecific(_bthread_local_key);
-        if (data == nullptr) {
-            return false;
-        }
-
-        QosBthreadLocal* local = static_cast<QosBthreadLocal*>(data);
-        if (local->bthread_id() != bthread_self()) {
-            DB_FATAL("diff bthread");
-            return false;
-        }
-
-        return local->is_new_sign();
+        return sqlqos_ptr->is_new_sign();
     }
 
     bool need_reject() {
@@ -700,16 +709,16 @@ public:
     bool match_reject_condition() {
         return _qos_reject.match_reject_condition();
     }
-    
+
 private:
 
-    StoreQos() 
+    StoreQos()
         : _globle_extended_bucket(true, FLAGS_max_tokens_per_second),
         _bthread_local_key(INVALID_BTHREAD_KEY) {
     }
 
     TokenBucket _globle_extended_bucket;
-    DoubleBufQos _sign_sqlqos_map;   
+    DoubleBufQos _sign_sqlqos_map;
     QosReject  _qos_reject;
     TimeCost _start_time;      // 实例启动时间
     bool _shutdown = false;

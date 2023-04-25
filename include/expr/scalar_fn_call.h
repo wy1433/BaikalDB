@@ -27,7 +27,8 @@ public:
     virtual ExprNode* transfer();
     virtual int open();
     virtual ExprValue get_value(MemRow* row);
-    pb::Function fn() {
+    virtual ExprValue get_value(const ExprValue& value);
+    const pb::Function& fn() {
         return _fn;
     }
     virtual void transfer_pb(pb::ExprNode* pb_node) {

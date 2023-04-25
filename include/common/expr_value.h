@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <iomanip>
 #include <sstream>
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
@@ -594,7 +595,7 @@ struct ExprValue {
             }
             case pb::DOUBLE: {
                 std::ostringstream oss;
-                oss << _u.double_val;
+                oss << std::setprecision(15) << _u.double_val;
                 return oss.str();
             }
             case pb::STRING:
@@ -870,7 +871,28 @@ struct ExprValue {
                  get_string().c_str(), end.get_string().c_str(), prefix_len, ret);
         return ret;
     }
+
+    // For ExprValueFlatSet
+    bool operator==(const ExprValue& other) const {
+        int64_t ret = other.compare(*this);
+        if (ret != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    struct HashFunction {
+        size_t operator()(const ExprValue& ev) const {
+            if (ev.type == pb::STRING || ev.type == pb::HEX) {
+                return ev.hash();
+            }
+            return ev._u.uint64_val;
+        }
+    };
 };
+
+using ExprValueFlatSet = butil::FlatSet<ExprValue, ExprValue::HashFunction>;
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

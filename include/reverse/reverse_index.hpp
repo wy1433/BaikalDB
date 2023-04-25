@@ -115,15 +115,15 @@ int ReverseIndex<Schema>::handle_reverse(
         std::make_shared<std::map<std::string, ReverseNode>>();
     if (_is_seg_cache) {
         if (_seg_cache.find(word, &cache_seg_res) != 0) {
-            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
+            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
             _seg_cache.add(word, seg_res);
         } else {
             *seg_res = *cache_seg_res;
             // 填充pk，flag信息
-            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
+            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
         }
     } else {
-        Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
+        Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
     }
     auto map_it = seg_res->begin();
     while (map_it != seg_res->end()) {
@@ -267,14 +267,17 @@ int ReverseIndex<Schema>::create_executor(
         return -1;
     }
     
-    schema_info->schema = new Schema();
+    schema_info->schema = new (std::nothrow) Schema();
+    if (schema_info->schema == nullptr) {
+        return -1;
+    }
     schema_info->schema_ptrs.emplace_back(schema_info->schema);
     schema_info->schema->init(this, txn, _key_range, conjuncts, is_fast);
     timer.reset();
     schema_info->schema->set_index_info(index_info);
     schema_info->schema->set_table_info(table_info);
     schema_info->schema->set_index_search(this);
-    int ret = schema_info->schema->create_executor(search_data, mode, _segment_type);
+    int ret = schema_info->schema->create_executor(search_data, mode, _segment_type, _charset);
     schema_info->schema->statistic().bool_engine_time += timer.get_time();
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);
@@ -687,8 +690,8 @@ int MutilReverseIndex<Schema>::search(
     _reverse_indexes = reverse_indexes;
     _index_info = index_info;
     _table_info = table_info;
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
     bool_executor_type type = NODE_COPY;
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
@@ -739,8 +742,8 @@ int MutilReverseIndex<Schema>::search(
     _table_info = table_info;
     _txn = txn;
     _is_fast = is_fast;
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
     _reverse_index_map = reverse_index_map;    
     _reverse_indexes.reserve(5);
     init_operator_executor(fulltext_index_info, _exe);

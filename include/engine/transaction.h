@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #pragma once
- 
+
 #include <memory>
 #include <stack>
 #include "common.h"
@@ -23,7 +23,7 @@
 #include "rocks_wrapper.h"
 #include "mut_table_key.h"
 #include "proto/meta.interface.pb.h"
-#include "proto/store.interface.pb.h" 
+#include "proto/store.interface.pb.h"
 #include "trace_state.h"
 #include "my_rocksdb.h"
 #include "tuple_record.h"
@@ -45,7 +45,7 @@ inline int64_t decode_first_8bytes2int64(const rocksdb::Slice& value) {
                 *reinterpret_cast<const uint64_t*>(value.data())));
 }
 
-// timestamp是否有效，我们认为从开发日期2021年到未来2121年的时间戳有效 
+// timestamp是否有效，我们认为从开发日期2021年到未来2121年的时间戳有效
 inline bool valid_timestamp_us(int64_t timestamp_us) {
     return timestamp_us > 1608336000000000LL && timestamp_us < 4761936000000000LL;
 }
@@ -60,7 +60,7 @@ struct RegionResource {
 };
 class Transaction {
 public:
-    Transaction(uint64_t txn_id, TransactionPool* pool) : 
+    Transaction(uint64_t txn_id, TransactionPool* pool) :
             _txn_id(txn_id),
             _pool(pool) {
         _write_opt.disableWAL = FLAGS_disable_wal;
@@ -82,7 +82,7 @@ public:
     }
 
     struct TxnOptions {
-        bool dml_1pc = false; 
+        bool dml_1pc = false;
         bool in_fsm = false; // 是否在状态机内执行
         int64_t lock_timeout = -1;
     };
@@ -98,7 +98,7 @@ public:
     rocksdb::Status prepare();
 
     rocksdb::Status commit();
-    
+
     rocksdb::Status rollback();
 
     // Set a savepoint for partial rollback in case of some DML execute failed on other store
@@ -124,23 +124,23 @@ public:
     // NON-UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields + primary_key, NULL>
     int put_secondary(int64_t region, IndexInfo& index, SmartRecord record);
     int put_meta_info(const std::string& key, const std::string& value);
-    
+
     int remove_meta_info(const std::string& key);
     // TODO: update return status
     // Return -2 if key not found
     // If get succ, value is encoded into "key"
     int get_update_primary(
-            int64_t     region, 
-            IndexInfo&  pk_index, 
-            const SmartRecord& key, 
+            int64_t     region,
+            IndexInfo&  pk_index,
+            const SmartRecord& key,
             std::map<int32_t, FieldInfo*>& fields,
             GetMode     mode,
             bool        check_region,
             int64_t&    ttl_ts);
     int get_update_primary(
-            int64_t     region, 
-            IndexInfo&  pk_index, 
-            const SmartRecord& key, 
+            int64_t     region,
+            IndexInfo&  pk_index,
+            const SmartRecord& key,
             std::map<int32_t, FieldInfo*>& fields,
             GetMode     mode,
             bool        check_region) {
@@ -148,17 +148,17 @@ public:
                 return get_update_primary(region, pk_index, key, fields, mode, check_region, ttl_ts);
             }
 
-    int get_update_primary(int64_t region, 
-            IndexInfo&      pk_index, 
+    int get_update_primary(int64_t region,
+            IndexInfo&      pk_index,
             const TableKey& key,
             const SmartRecord& val,
             std::map<int32_t, FieldInfo*>& fields,
             GetMode         mode,
             bool            check_region,
             int64_t&        ttl_ts);
-    
-    int get_update_primary(int64_t region, 
-            IndexInfo&      pk_index, 
+
+    int get_update_primary(int64_t region,
+            IndexInfo&      pk_index,
             const TableKey& key,
             const SmartRecord& val,
             std::map<int32_t, FieldInfo*>& fields,
@@ -169,10 +169,63 @@ public:
             }
 
     int get_update_primary_columns(
-            const TableKey& primary_key,
-            GetMode         mode,
-            const SmartRecord&   val,
-            std::map<int32_t, FieldInfo*>& fields);
+        const TableKey& primary_key,
+        GetMode         mode,
+        const SmartRecord&  val,
+        MemRow*         mem_row,
+        int32_t         tuple_id,
+        std::vector<int32_t>* field_slot,
+        std::map<int32_t, FieldInfo*>& fields);
+
+    int multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        std::vector<MutTableKey>& raw_read_keys,
+        std::vector<rocksdb::Slice>& rocksdb_keys,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool sorted_input);
+
+    int multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        const std::vector<TableKeyPair*>& read_keys,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool            check_region,
+        bool sorted_input);
+
+    int multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        BatchRecord& read_records,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool sorted_input);
+
+    int multiget_secondary(
+        int64_t         region,
+        IndexInfo&      pk_index,
+        IndexInfo&      index,
+        const std::vector<TableKeyPair*>& read_keys,
+        const SmartRecord& record_templete,
+        BatchRecord& read_records,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::vector<int32_t>& field_slot,
+        bool  parse_to_record,
+        bool  check_region,
+        bool  sorted_input);
 
     // TODO: update return status
     // Return -2 if key not found
@@ -180,16 +233,16 @@ public:
             int64_t         region,
             IndexInfo&      pk_index,
             IndexInfo&      index,
-            const SmartRecord& key, 
+            const SmartRecord& key,
             GetMode         mode,
             bool            check_region);
-    
+
     int get_update_secondary(
             int64_t         region,
             IndexInfo&      pk_index,
             IndexInfo&      index,
             const TableKey& key,
-            const SmartRecord&  val, 
+            const SmartRecord&  val,
             GetMode         mode,
             bool            check_region);
 
@@ -197,7 +250,7 @@ public:
     rocksdb::Status put_kv_without_lock(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
     int put_kv(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
     int delete_kv(const std::string& key);
-    
+
     int remove(int64_t region, IndexInfo& index, const SmartRecord key);
     int remove(int64_t region, IndexInfo& index, const TableKey&   key);
     int remove_columns(const TableKey& primary_key);
@@ -395,10 +448,10 @@ public:
     bool use_ttl() const { return _use_ttl; }
 
     static int get_full_primary_key(
-            rocksdb::Slice  index_bytes, 
+            rocksdb::Slice  index_bytes,
             rocksdb::Slice  pk_bytes,
-            IndexInfo&      pk_index, 
-            IndexInfo&      index_info, 
+            IndexInfo&      pk_index,
+            IndexInfo&      index_info,
             char*           pk_buf);
 
     // Check whether the pair <key, value> resides within the region range [start, end);
@@ -419,7 +472,7 @@ public:
     int fits_region_range_for_primary(IndexInfo& pk_index,
         SmartRecord record,
         bool& result);
-    
+
     pb::StoreReq* get_raftreq() {
         return &_store_req;
     }
@@ -428,8 +481,9 @@ public:
         _store_res.Clear();
         _store_res.CopyFrom(response);
     }
-    void swap_last_response(pb::StoreRes& response) {
-        response.Swap(&_store_res);
+
+    void load_last_response(pb::StoreRes& response) {
+        response.CopyFrom(_store_res);
     }
 
     void set_primary_region_id(int64_t region_id) {
@@ -507,26 +561,26 @@ public:
 
 private:
     int get_update_primary(
-            int64_t         region, 
-            IndexInfo&      pk_index, 
-            const TableKey& key, 
-            GetMode         mode, 
-            const SmartRecord&  val, 
+            int64_t         region,
+            IndexInfo&      pk_index,
+            const TableKey& key,
+            GetMode         mode,
+            const SmartRecord&  val,
             std::map<int32_t, FieldInfo*>& fields,
             bool            parse_key,
             bool            check_region,
             int64_t&        ttl_ts);
-    
+
     int get_update_secondary(
-            int64_t           region, 
+            int64_t           region,
             IndexInfo&        pk_index,
             IndexInfo&        index,
             const TableKey& key,
-            const SmartRecord& val, 
-            GetMode           mode, 
+            const SmartRecord& val,
+            GetMode           mode,
             MutTableKey&      pk_val,
             bool              check_region);
-    
+
     void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us, bool is_primary_key) {
         //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
         //           str_to_hex(key).c_str(), str_to_hex(value).c_str());
@@ -537,7 +591,7 @@ private:
         kv_op->set_is_primary_key(is_primary_key);
         kv_op->set_ttl_timestamp_us(ttl_timestamp_us);
     }
-    
+
     void add_kvop_delete(std::string& key, bool is_primary_key) {
         //DB_WARNING("txn:%p, add kvop delete key:%s", this, str_to_hex(key).c_str());
         pb::KvOp* kv_op = _store_req.add_kv_ops();
@@ -545,8 +599,8 @@ private:
         kv_op->set_key(key);
         kv_op->set_is_primary_key(is_primary_key);
     }
-    
-    // seq_id should be updated after each query execution regardless of success or failure 
+
+    // seq_id should be updated after each query execution regardless of success or failure
     int                             _seq_id = 0;
     int                             _applied_seq_id = 0;
     uint64_t                        _txn_id = 0;
@@ -571,7 +625,7 @@ private:
 
     rocksdb::WriteOptions           _write_opt;
     rocksdb::TransactionOptions     _txn_opt;
-    
+
     myrocksdb::Transaction*         _txn = nullptr;
     rocksdb::ColumnFamilyHandle*    _data_cf = nullptr;
     rocksdb::ColumnFamilyHandle*    _meta_cf = nullptr;
