@@ -26,6 +26,7 @@
 #include "binlog_context.h"
 #include "handle_helper.h"
 #include "show_helper.h"
+#include "lru_cache.h"
 
 namespace baikaldb {
 
@@ -82,9 +83,27 @@ enum QUERY_TYPE {
     SQL_WRITE_NUM                           = 255
 };
 
+struct QueryCacheCond {
+    BthreadCond cond;
+    bool ret;
+    SmartSocket client;
+    QueryCacheCond(SmartSocket c) : ret(true), client(c) {
+        DB_DEBUG("cache sql: %s", client->query_ctx->sql.c_str());
+    };
+    void finish_wait() {
+        cond.decrease_signal();
+    }
+};
+typedef std::shared_ptr<QueryCacheCond> SmartQueryCacheCond;
+
 class StateMachine {
 public:
     ~StateMachine() {
+        if (_query_cache_queue) {
+            _query_cache_queue->stop();
+            _query_cache_queue.reset();
+            execution_queue_join(_query_cache_queue_id);
+       }
     }
 
     static StateMachine* get_instance() {
@@ -104,6 +123,16 @@ private:
                     exec_sql_error("exec_sql_error"),
                     exec_sql_error_second("exec_sql_error_second", &exec_sql_error){
         _wrapper = MysqlWrapper::get_instance();
+        // for query cache
+        bthread::ExecutionQueueOptions opt;
+        if (bthread::execution_queue_start(&_query_cache_queue_id, &opt, pending_query, (void*)this) != 0) {
+          DB_FATAL("fail to start execution_queue.");
+        }
+        _query_cache_queue = execution_queue_address(_query_cache_queue_id);
+        if (!_query_cache_queue) {
+          DB_FATAL("fail to address execution_queue.");
+        }
+        _query_cache.init(100);
     }
 
     StateMachine& operator=(const StateMachine& other);
@@ -136,6 +165,9 @@ private:
     int _reset_network_socket_client_resource(SmartSocket client);
     void _print_query_time(SmartSocket client);
 
+    bool _handle_client_query_with_cache(SmartSocket client);
+    static int pending_query(void* st, bthread::TaskIterator<SmartQueryCacheCond>& iter);
+
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
     bvar::LatencyRecorder txn_alive_time_cost;
@@ -148,6 +180,31 @@ private:
     std::mutex          _mutex;
 
     MysqlWrapper*   _wrapper = nullptr;
+    // query cache
+    bthread::ExecutionQueueId<SmartQueryCacheCond> _query_cache_queue_id;
+    bthread::ExecutionQueue<SmartQueryCacheCond>::scoped_ptr_t _query_cache_queue;
+    struct QueryBuffer {
+        QueryBuffer() {
+            _time = butil::gettimeofday_us();
+        }
+        bool is_expired(int64_t expired_time_us) {
+            return _time + expired_time_us < butil::gettimeofday_us();
+        }
+        void set_buffer(const DataBuffer* buffer) {
+            SmartBuffer tmp_buf(new DataBuffer());
+            tmp_buf->byte_array_append_len(buffer->_data, buffer->_size);
+            _buf.swap(tmp_buf);
+            _time = butil::gettimeofday_us();
+        }
+        void get_buffer(DataBuffer* buffer) {
+            buffer->byte_array_clear();
+            buffer->byte_array_append_len(_buf->_data, _buf->_size);
+        }
+        SmartBuffer _buf;
+        int64_t _time;
+    };
+    typedef std::shared_ptr<QueryBuffer> SmartQueryBuffer;
+    Cache<std::string, SmartQueryBuffer> _query_cache;
 
 public:
     bvar::Adder<BvarMap> sql_agg_cost;

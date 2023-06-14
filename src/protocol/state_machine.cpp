@@ -1076,6 +1076,9 @@ bool StateMachine::_query_process(SmartSocket client) {
         } else if (type == SQL_SHOW_NUM) {
             _wrapper->make_simple_ok_packet(client);
             client->state = STATE_READ_QUERY_RESULT;
+        } else if (client->query_ctx->query_cache > 0) {
+            ret = _handle_client_query_with_cache(client);
+            client->state = (client->state == STATE_ERROR) ? STATE_ERROR : STATE_READ_QUERY_RESULT;
         } else {
             //对于正常的请求做限制
             if (client->user_info->is_exceed_quota()) {
@@ -1190,6 +1193,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->peer_index = json_iter->value.GetInt64();
                 DB_WARNING("peer_index: %ld", ctx->peer_index);
+            }
+            json_iter = root.FindMember("query_cache");
+            if (json_iter != root.MemberEnd()) {
+                ctx->query_cache = json_iter->value.GetInt64();
+                DB_WARNING("query_cache: %ld", ctx->query_cache);
             }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());
@@ -1830,5 +1838,74 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         return false;
     }
     return true;
+}
+
+bool StateMachine::_handle_client_query_with_cache(SmartSocket client) {
+    auto& key = client->query_ctx->sql;
+    SmartQueryBuffer tmp_ptr(new QueryBuffer());
+    if (_query_cache.find(key, &tmp_ptr) == 0) {
+        if (!tmp_ptr->is_expired(client->query_ctx->query_cache * 1000L)) {
+            // read from cache
+            tmp_ptr->get_buffer(client->send_buf);
+            DB_DEBUG("cached, cache=%ld, now=%ld", tmp_ptr->_time, butil::gettimeofday_us());
+            return true;
+        }
+    }
+    // 需要回写缓存的请求顺序执行，保证相同sql的并发请求，第一个Query读Store，后续Query读Cache
+    // TODO 按SQL粒度顺序执行
+    auto pending_client_query = [&client, this] (SmartQueryCacheCond c) {
+        c->cond.increase();
+        if (_query_cache_queue == nullptr
+             || _query_cache_queue->execute(c, &bthread::TASK_OPTIONS_NORMAL, NULL) != 0) {
+             c->finish_wait();
+             DB_FATAL("execute_queue fail");
+             return -1;
+         }
+         return 0;
+    };
+    SmartQueryCacheCond c = std::make_shared<QueryCacheCond>(client);
+    if (c == nullptr || pending_client_query(c) < 0) {
+        return false;
+    }
+    int r = c->cond.timed_wait(10 * 1000 * 1000LL); // 10s超时
+    if (r != 0) {
+       // 10s超时失败
+       client->query_ctx->stat_info.error_code = ER_QUERY_CACHE_DISABLED;
+       client->query_ctx->stat_info.error_msg << "query cache failed, timeout";
+       return false;
+    }
+    return c->ret;
+}
+int StateMachine::pending_query(void* st, bthread::TaskIterator<SmartQueryCacheCond>& iter) {
+    StateMachine* s = (StateMachine*)st;
+    if (iter.is_queue_stopped()) {
+        for (; iter; ++iter) {
+            (*iter)->finish_wait();
+        }
+        return 0;
+    }
+    for (; iter; ++iter) {
+        // double check cache before query
+        auto& client = (*iter)->client;
+        DB_DEBUG("cache sql: %s", client->query_ctx->sql.c_str());
+        auto& key = client->query_ctx->sql;
+        SmartQueryBuffer tmp_ptr(new QueryBuffer());
+        if (s->_query_cache.find(key, &tmp_ptr) == 0) {
+            if (!tmp_ptr->is_expired(client->query_ctx->query_cache * 1000L)) {
+                // read from cache
+                tmp_ptr->get_buffer(client->send_buf);
+                DB_DEBUG("read from cache in queue");
+                (*iter)->finish_wait();
+                continue;
+            }
+        }
+        (*iter)->ret = s->_handle_client_query_common_query((*iter)->client);
+        // write to cache
+        tmp_ptr->set_buffer(client->send_buf);
+        s->_query_cache.add(key, tmp_ptr);
+        DB_DEBUG("write to cache in queue");
+        (*iter)->finish_wait();
+    }
+    return 0;
 }
 } // namespace baikal
